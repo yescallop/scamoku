@@ -5,6 +5,16 @@ use crate::game::*;
 use crate::rule::standard::*;
 
 #[test]
+fn point() {
+    assert_eq!(Point::new(0, 0), "A1".parse().unwrap());
+    assert_eq!(Point::new(26, 9), "aa10".parse().unwrap());
+    for x in 0..1000 {
+        let p = Point::new(x, 0);
+        assert_eq!(p, p.to_string().parse().unwrap());
+    }
+}
+
+#[test]
 fn standard_gomoku() {
     let Handle {
         player_handles: ((tx1, _), (tx2, _)),

@@ -174,8 +174,7 @@ impl PlayerMsgSender {
 
 impl Drop for PlayerMsgSender {
     fn drop(&mut self) {
-        let res = self.send(PlayerMsg::Disconnect);
-        drop(res);
+        self.send(PlayerMsg::Disconnect);
     }
 }
 

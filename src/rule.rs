@@ -5,7 +5,7 @@ use super::game::*;
 
 use anyhow::*;
 pub trait Rule: Send + 'static {
-    fn id(&self) -> &str;
+    fn id(&self) -> String;
 
     fn variant(&self) -> Variant;
 
@@ -24,12 +24,13 @@ pub enum Variant {
 }
 
 impl Rule for Variant {
-    fn id(&self) -> &str {
+    fn id(&self) -> String {
         match *self {
             Variant::StandardGomoku => "standard_gomoku",
             Variant::FreestyleGomoku => "freestyle_gomoku",
             Variant::StandardRenju => "standard_renju",
         }
+        .into()
     }
 
     fn variant(&self) -> Variant {
@@ -86,8 +87,8 @@ pub mod standard {
     pub struct Pro;
 
     impl Rule for Pro {
-        fn id(&self) -> &str {
-            "pro"
+        fn id(&self) -> String {
+            "pro".into()
         }
 
         fn variant(&self) -> Variant {
@@ -119,8 +120,8 @@ pub mod standard {
     pub struct LongPro;
 
     impl Rule for LongPro {
-        fn id(&self) -> &str {
-            "long_pro"
+        fn id(&self) -> String {
+            "long_pro".into()
         }
 
         fn variant(&self) -> Variant {
@@ -152,8 +153,8 @@ pub mod standard {
     pub struct Swap;
 
     impl Rule for Swap {
-        fn id(&self) -> &str {
-            "swap"
+        fn id(&self) -> String {
+            "swap".into()
         }
 
         fn variant(&self) -> Variant {
@@ -182,8 +183,8 @@ pub mod standard {
     pub struct Swap2;
 
     impl Rule for Swap2 {
-        fn id(&self) -> &str {
-            "swap2"
+        fn id(&self) -> String {
+            "swap2".into()
         }
 
         fn variant(&self) -> Variant {
@@ -221,8 +222,8 @@ pub mod standard {
     pub struct ChineseSwap;
 
     impl Rule for ChineseSwap {
-        fn id(&self) -> &str {
-            "chinese_swap"
+        fn id(&self) -> String {
+            "chinese_swap".into()
         }
 
         fn variant(&self) -> Variant {

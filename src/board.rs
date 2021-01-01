@@ -21,14 +21,40 @@ impl Point {
 
 impl fmt::Debug for Point {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Point({},{})", self.x, self.y)
+        write!(f, "({},{})", self.x, self.y)
     }
 }
 
+use anyhow::ensure;
+
 impl FromStr for Point {
     type Err = anyhow::Error;
-    fn from_str(_s: &str) -> Result<Self, Self::Err> {
-        todo!()
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+        ensure!(len >= 2, "length < 2");
+
+        let mut x = 0;
+
+        let mut i = 0;
+        while i < len {
+            let b = bytes[i];
+            let n = match b {
+                b'a'..=b'z' => b - b'a',
+                b'A'..=b'Z' => b - b'A',
+                _ => {
+                    anyhow::ensure!(x != 0, "no column");
+                    break;
+                }
+            } as u32;
+
+            x *= 26;
+            x += n + 1;
+            i += 1;
+        }
+        let x = x - 1;
+        let y = s[i..].parse::<u32>()? - 1;
+        Ok(Point { x, y })
     }
 }
 
@@ -227,27 +253,27 @@ impl IndexMut<Point> for Board {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Direction {
-    Right,
-    UpRight,
     Up,
-    UpLeft,
-    Left,
-    DownLeft,
-    Down,
+    UpRight,
+    Right,
     DownRight,
+    Down,
+    DownLeft,
+    Left,
+    UpLeft,
 }
 
 impl Direction {
     pub fn opposite(self) -> Direction {
         match self {
-            Right => Left,
-            UpRight => DownLeft,
             Up => Down,
-            UpLeft => DownRight,
-            Left => Right,
-            DownLeft => UpRight,
-            Down => Up,
+            UpRight => DownLeft,
+            Right => Left,
             DownRight => UpLeft,
+            Down => Up,
+            DownLeft => UpRight,
+            Left => Right,
+            UpLeft => DownRight,
         }
     }
 }
@@ -296,14 +322,14 @@ impl BoardExt for Board {
     fn adjacent(&self, p: Point, d: Direction) -> Option<Point> {
         let (x, y) = (p.x, p.y);
         let res = match d {
-            Right => (Some(x + 1), Some(y)),
-            UpRight => (Some(x + 1), Some(y + 1)),
             Up => (Some(x), Some(y + 1)),
-            UpLeft => (x.checked_sub(1), Some(y + 1)),
-            Left => (x.checked_sub(1), Some(y)),
-            DownLeft => (x.checked_sub(1), y.checked_sub(1)),
-            Down => (Some(x), y.checked_sub(1)),
+            UpRight => (Some(x + 1), Some(y + 1)),
+            Right => (Some(x + 1), Some(y)),
             DownRight => (Some(x + 1), y.checked_sub(1)),
+            Down => (Some(x), y.checked_sub(1)),
+            DownLeft => (x.checked_sub(1), y.checked_sub(1)),
+            Left => (x.checked_sub(1), Some(y)),
+            UpLeft => (x.checked_sub(1), Some(y + 1)),
         };
         let size = self.size();
         match res {
@@ -317,10 +343,10 @@ impl BoardExt for Board {
             let stone = board[p].stone.expect("empty intersection");
             let mut res = 1;
 
-            for cur_d in &[d, d.opposite()] {
+            for cur_d in [d, d.opposite()].iter().copied() {
                 let mut cur_p = p;
                 loop {
-                    cur_p = match board.adjacent(cur_p, *cur_d) {
+                    cur_p = match board.adjacent(cur_p, cur_d) {
                         Some(p) => p,
                         None => break,
                     };
