@@ -23,7 +23,7 @@ pub enum ChoiceSet {
 
 impl ChoiceSet {
     pub fn from_msg(v: Vec<&str>) -> ChoiceSet {
-        let v = v.into_iter().map(|s| s.to_owned()).collect();
+        let v = v.into_iter().map(|s| s.into()).collect();
         ChoiceSet::Message(v)
     }
 
@@ -314,6 +314,7 @@ pub struct Handle {
 pub fn start_with_rule(rule: impl Rule) -> Handle {
     Builder::with_rule(rule).start()
 }
+
 pub struct Control {
     msg_txs: (Sender<Msg>, Sender<Msg>),
     msg_rx: Receiver<RawPlayerMsg>,
@@ -453,11 +454,20 @@ impl Control {
         self.choice_data = Some((side, choice_set));
     }
 
-    pub fn end(&mut self, kind: GameResultKind, winning_side: Option<Side>) {
+    pub fn end(&mut self, kind: GameResultKind, winning_side: Side) {
         if self.result.is_none() {
             self.result = Some(GameResult {
                 kind,
-                winning_side: winning_side.map(|s| (s, self.stone_by_side(s))),
+                winning_side: Some((winning_side, self.stone_by_side(winning_side))),
+            });
+        }
+    }
+
+    pub fn end_draw(&mut self, kind: GameResultKind) {
+        if self.result.is_none() {
+            self.result = Some(GameResult {
+                kind,
+                winning_side: None,
             });
         }
     }
@@ -479,13 +489,9 @@ impl Control {
     }
 
     fn msg_both(&mut self, msg: Msg) {
-        let res = self
-            .msg_txs
-            .0
-            .send(msg.clone())
-            .and_then(|_| self.msg_txs.1.send(msg));
         // Ignore if message receiver is dropped.
-        drop(res);
+        drop(self.msg_txs.0.send(msg.clone()));
+        drop(self.msg_txs.1.send(msg));
     }
 
     fn err(&mut self, side: Side, msg: String) {
@@ -523,7 +529,7 @@ impl Control {
 
         while self.result.is_none() {
             if self.board.cur_move_index() == self.max_move_index {
-                self.end(GameResultKind::BoardFull, None);
+                self.end_draw(GameResultKind::BoardFull);
                 break;
             }
 
@@ -549,10 +555,10 @@ impl Control {
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     // Might never reach here, but we do handle it.
-                    self.end(GameResultKind::PlayerDisconnect, None)
+                    self.end_draw(GameResultKind::PlayerDisconnect)
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    self.end(GameResultKind::Timeout, Some(side.opposite()))
+                    self.end(GameResultKind::Timeout, side.opposite())
                 }
             }
         }
@@ -569,14 +575,10 @@ impl Control {
             self.event(Event::ChoiceRequest(side, choice_set));
         } else {
             let side = self.cur_side;
-            let offer_ord = if let Some(v) = &self.offered_moves {
-                Some(OfferOrd {
-                    ord: v.len(),
-                    total: v.capacity(),
-                })
-            } else {
-                None
-            };
+            let offer_ord = self.offered_moves.as_ref().map(|v| OfferOrd {
+                ord: v.len(),
+                total: v.capacity(),
+            });
             self.msg(side, Msg::MoveRequest(offer_ord));
             self.event(Event::MoveRequest(side, offer_ord));
         }
@@ -622,7 +624,7 @@ impl Control {
         match msg {
             PlayerMsg::Move(p, attr) => self.process_move(side, p, attr)?,
             PlayerMsg::WinClaim(p) => {
-                ensure!(!self.strict, "win claim is not available in strict mode");
+                ensure!(!self.strict, "win claim is unavailable in strict mode");
                 ensure!(!self.in_opening, "win claim in the opening");
                 let int = self
                     .board
@@ -668,11 +670,9 @@ impl Control {
                     self.last_draw_offer && side == self.cur_side,
                     "inappropriate draw offer acceptance"
                 );
-                self.end(GameResultKind::DrawOfferAccepted, None);
+                self.end_draw(GameResultKind::DrawOfferAccepted);
             }
-            PlayerMsg::Disconnect => {
-                self.end(GameResultKind::PlayerDisconnect, Some(side.opposite()))
-            }
+            PlayerMsg::Disconnect => self.end(GameResultKind::PlayerDisconnect, side.opposite()),
         }
         Ok(())
     }
@@ -747,7 +747,7 @@ impl Control {
         } else {
             ensure!(!self.in_opening, "pass in the opening");
             if self.last_pass {
-                self.end(GameResultKind::BothPass, None);
+                self.end_draw(GameResultKind::BothPass);
             }
             self.last_pass = true;
 

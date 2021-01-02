@@ -56,12 +56,12 @@ impl Variant {
         match self {
             Variant::StandardGomoku => {
                 if board.longest_row_len(p) == 5 {
-                    ctrl.end(GameResultKind::RowCompleted, Some(side));
+                    ctrl.end(GameResultKind::RowCompleted, side);
                 }
             }
             Variant::FreestyleGomoku => {
                 if board.longest_row_len(p) >= 5 {
-                    ctrl.end(GameResultKind::RowCompleted, Some(side));
+                    ctrl.end(GameResultKind::RowCompleted, side);
                 }
             }
             Variant::StandardRenju => todo!("standard renju"),
