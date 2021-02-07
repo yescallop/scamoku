@@ -1,8 +1,6 @@
 use std::sync::mpsc::Receiver;
 
-use crate::board::*;
-use crate::game::*;
-use crate::rule::standard::*;
+use crate::{board::*, console, game::*, rule::standard::*};
 
 #[test]
 fn point() {
@@ -20,13 +18,13 @@ fn standard_gomoku() {
         player_handles: ((tx1, _), (tx2, _)),
         event_rx,
         join_handle,
-    } = Builder::with_rule(StandardGomoku).strict().start();
+    } = Builder::with_rule(&StandardGomoku).strict().start();
     for i in 0..5 {
-        tx1.make_move(Some(Point::new(i, i)));
-        tx2.make_move(Some(Point::new(i + 1, i)));
+        tx1.make_move((i, i).into());
+        tx2.make_move((i + 1, i).into());
     }
 
-    log_events(event_rx);
+    console::log_events(event_rx);
     assert_eq!(
         join_handle.join().unwrap(),
         GameResult {
@@ -37,19 +35,19 @@ fn standard_gomoku() {
 }
 
 #[test]
-fn freestyle_gomoku() {
-    let Handle {
-        player_handles: ((tx1, _), (tx2, _)),
+fn freestyle_gomoku_raw() {
+    let RawHandle {
+        msg_tx,
         event_rx,
         join_handle,
-    } = Builder::with_rule(FreestyleGomoku).start();
+    } = Builder::with_rule(&FreestyleGomoku).start_raw();
     for i in 0..5 {
-        tx1.make_move(Some(Point::new(if i == 4 { 5 } else { i }, 0)));
-        tx2.make_move(Some(Point::new(i * 2, 1)));
+        msg_tx.make_move((if i == 4 { 5 } else { i }, 0).into());
+        msg_tx.make_move((i * 2, 1).into());
     }
-    tx1.claim_win(Point::new(4, 0));
+    msg_tx.claim_win((4, 0).into());
 
-    log_events(event_rx);
+    console::log_events(event_rx);
     assert_eq!(
         join_handle.join().unwrap(),
         GameResult {
@@ -59,50 +57,28 @@ fn freestyle_gomoku() {
     );
 }
 
-fn log_events(event_rx: Receiver<Event>) {
-    for e in event_rx {
-        match e {
-            Event::GameStart(s) => {
-                println!("----- GAME SETTINGS -----");
-                println!("Rule ID: {}", s.rule_id);
-                println!("Variant: {}", s.variant);
-                println!("Board size: {}", s.board_size);
-                println!("Move timeout: {:?}", s.move_timeout);
-                println!("Game timeout: {:?}", s.game_timeout);
-                println!("Strict mode: {}", s.strict);
-                println!("----- GAME STARTED -----");
+#[test]
+fn errors() {
+    let Handle {
+        player_handles: ((_tx1, _), (tx2, _)),
+        event_rx,
+        join_handle: _,
+    } = Builder::with_rule(&StandardGomoku).strict().start();
+
+    tx2.make_move((0, 0).into());
+    assert_next_err(event_rx, "not your turn to move");
+}
+
+fn assert_next_err(event_rx: Receiver<Event>, msg: &str) {
+    let actual_msg = event_rx
+        .iter()
+        .find_map(|e| {
+            if let Event::Error(_, _, m) = e {
+                Some(m)
+            } else {
+                None
             }
-            Event::MoveRequest(_, _) => {}
-            Event::ChoiceRequest(_, _) => {}
-            Event::DeadlineUpdate(_) => {}
-            Event::PlayerMsg(_, _) => {}
-            Event::Move(side, stone, p, attr) => {
-                if let Some(p) = p {
-                    if attr == MoveAttr::DrawOffer {
-                        println!("{} ({}) moved and offered a draw: {}", side, stone, p);
-                    } else {
-                        println!("{} ({}) moved: {}", side, stone, p);
-                    }
-                } else {
-                    println!("{} ({}) passed.", side, stone);
-                }
-            }
-            Event::Choice(_, _, _) => {}
-            Event::StoneSwap => {
-                println!("The stones are swapped");
-            }
-            Event::GameEnd(res) => {
-                println!("----- GAME ENDED -----");
-                if let Some((side, stone)) = res.winning_side {
-                    println!("The winner: {} ({})", side, stone);
-                } else {
-                    println!("The game ended in a draw.");
-                }
-                println!("Reason: {}", res.kind);
-            }
-            Event::Error(side, msg) => {
-                println!("Error from {}: {}", side, msg);
-            }
-        }
-    }
+        })
+        .unwrap();
+    assert_eq!(actual_msg, msg);
 }

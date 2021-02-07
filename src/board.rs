@@ -13,9 +13,15 @@ pub struct Point {
 }
 
 impl Point {
-    /// Constructs a new `Point` with specific coordinates.
+    /// Constructs a new `Point` with the given coordinates.
     pub fn new(x: u32, y: u32) -> Point {
         Point { x, y }
+    }
+}
+
+impl From<(u32, u32)> for Point {
+    fn from(t: (u32, u32)) -> Self {
+        Point::new(t.0, t.1)
     }
 }
 
@@ -25,10 +31,11 @@ impl fmt::Debug for Point {
     }
 }
 
-use anyhow::ensure;
+use anyhow::{ensure, Context};
 
 impl FromStr for Point {
     type Err = anyhow::Error;
+    /// Parses a point reference, e.g. C5, ab12, etc., into a `Point`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let bytes = s.as_bytes();
         let len = bytes.len();
@@ -43,7 +50,7 @@ impl FromStr for Point {
                 b'a'..=b'z' => b - b'a',
                 b'A'..=b'Z' => b - b'A',
                 _ => {
-                    anyhow::ensure!(x != 0, "no column");
+                    ensure!(x != 0, "invalid column");
                     break;
                 }
             } as u32;
@@ -53,12 +60,13 @@ impl FromStr for Point {
             i += 1;
         }
         let x = x - 1;
-        let y = s[i..].parse::<u32>()? - 1;
+        let y = s[i..].parse::<u32>().context("invalid row")? - 1;
         Ok(Point { x, y })
     }
 }
 
 impl fmt::Display for Point {
+    /// Formats a `Point` as a point reference.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.x < 26 {
             // Avoid unnecessary calculations for x < 26
@@ -82,6 +90,7 @@ impl fmt::Display for Point {
         v.reverse();
         f.write_fmt(format_args!(
             "{}{}",
+            // SAFETY: The bytes are all ASCII thus valid UTF-8 and reversible.
             unsafe { String::from_utf8_unchecked(v) },
             self.y + 1
         ))
@@ -98,6 +107,7 @@ pub struct Intersection {
 }
 
 impl Intersection {
+    /// Returns the stone type in the intersection, or `None` if empty.
     pub fn stone(&self) -> Option<Stone> {
         self.stone
     }
@@ -107,6 +117,7 @@ impl Intersection {
         self.stone.is_none()
     }
 
+    /// Returns the move index of the intersection starting from 1, or `0` if empty.
     pub fn move_index(&self) -> u32 {
         self.move_index
     }
@@ -142,19 +153,11 @@ impl fmt::Display for Stone {
 }
 
 /// A square gomoku board.
-///
-/// Optimized for the most common Renju board (15x15).
 #[derive(Debug, Clone)]
-pub enum Board {
-    Renju {
-        ints: [Intersection; 15 * 15],
-        cur_move_index: u32,
-    },
-    Vec {
-        size: u32,
-        ints: Vec<Intersection>,
-        cur_move_index: u32,
-    },
+pub struct Board {
+    size: u32,
+    ints: Vec<Intersection>,
+    cur_move_index: u32,
 }
 
 impl Board {
@@ -162,46 +165,27 @@ impl Board {
     pub fn new(size: u32) -> Self {
         assert!(size >= 5, "size < 5");
         assert!(size % 2 == 1, "even size: {}", size);
-        if size == 15 {
-            Board::Renju {
-                ints: [Default::default(); 15 * 15],
-                cur_move_index: 0,
-            }
-        } else {
-            let cap = size * size;
-            let mut ints = Vec::with_capacity(cap as usize);
-            for _ in 0..cap {
-                ints.push(Default::default());
-            }
-            Board::Vec {
-                size,
-                ints,
-                cur_move_index: 0,
-            }
+        Board {
+            size,
+            ints: vec![Default::default(); (size * size) as usize],
+            cur_move_index: 0,
         }
     }
 
-    /// Returns the size of the board, that is the number of columns or rows on the board.
+    /// Returns the size of the board, that is, the number of columns or rows on the board.
     pub fn size(&self) -> u32 {
-        match *self {
-            Board::Renju { .. } => 15,
-            Board::Vec { size, .. } => size,
-        }
+        self.size
     }
 
     /// Returns the current move index of the board, or `0` if the board is empty.
     pub fn cur_move_index(&self) -> u32 {
-        match *self {
-            Board::Renju { cur_move_index, .. } | Board::Vec { cur_move_index, .. } => {
-                cur_move_index
-            }
-        }
+        self.cur_move_index
     }
 
     /// Returns the index of an intersection in `ints`,
-    /// or `None` if the given point is out of the board.
+    /// or `None` if the given point is out of board.
     fn index_at(&self, p: Point) -> Option<usize> {
-        let size = self.size();
+        let size = self.size;
         if p.x < size && p.y < size {
             Some((p.y * size + p.x) as usize)
         } else {
@@ -210,28 +194,23 @@ impl Board {
     }
 
     /// Returns a reference to an intersection,
-    /// or `None` if the given point is out of the board.
+    /// or `None` if the given point is out of board.
     pub fn get(&self, p: Point) -> Option<&Intersection> {
-        self.index_at(p).map(|i| match self {
-            Board::Renju { ints, .. } => &ints[i],
-            Board::Vec { ints, .. } => &ints[i],
-        })
+        self.index_at(p).map(|i| &self.ints[i])
     }
 
     /// Returns a mutable reference to an intersection,
-    /// or `None` if the given point is out of the board.
+    /// or `None` if the given point is out of board.
     pub fn get_mut(&mut self, p: Point) -> Option<&mut Intersection> {
         match self.index_at(p) {
-            Some(i) => Some(match self {
-                Board::Renju { ints, .. } => &mut ints[i],
-                Board::Vec { ints, .. } => &mut ints[i],
-            }),
+            Some(i) => Some(&mut self.ints[i]),
             None => None,
         }
     }
 }
 
 impl Default for Board {
+    /// Returns a default board of size 15 (Renju Board).
     fn default() -> Self {
         Board::new(15)
     }
@@ -251,6 +230,7 @@ impl IndexMut<Point> for Board {
     }
 }
 
+/// A direction on the board.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Direction {
     Up,
@@ -264,6 +244,7 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// Returns the opposite direction.
     pub fn opposite(self) -> Direction {
         match self {
             Up => Down,
@@ -278,23 +259,32 @@ impl Direction {
     }
 }
 
+/// The extensions for a board.
 pub trait BoardExt {
+    /// Makes a move on the board.
     fn make_move(&mut self, p: Point, stone: Stone);
+
+    /// Tests if two points are symmetrical on the board.
     fn is_symmetrical(&self, p1: Point, p2: Point) -> bool;
+
+    /// Returns the adjacent point on the given direction of a point.
+    ///
+    /// `None` is returned when reaching out of board.
     fn adjacent(&self, p: Point, d: Direction) -> Option<Point>;
+
+    /// Returns the length of the longest row at a point, or 0 if empty.
     fn longest_row_len(&self, p: Point) -> u32;
+
+    /// Returns the [Chebyshev distance][1] from a point to the board center.
+    ///
+    /// [1]: https://en.wikipedia.org/wiki/Chebyshev_distance
     fn chebyshev_dist_to_center(&self, p: Point) -> u32;
 }
 
 impl BoardExt for Board {
     fn make_move(&mut self, p: Point, stone: Stone) {
-        let index_mut = match self {
-            Board::Renju { cur_move_index, .. } | Board::Vec { cur_move_index, .. } => {
-                cur_move_index
-            }
-        };
-        let index = *index_mut + 1;
-        *index_mut = index;
+        let index = self.cur_move_index + 1;
+        self.cur_move_index = index;
 
         let int = self.get_mut(p).expect("moving out of board");
         assert!(int.is_empty(), "moving into an occupied intersection");
@@ -339,8 +329,8 @@ impl BoardExt for Board {
     }
 
     fn longest_row_len(&self, p: Point) -> u32 {
-        fn row_len(board: &Board, p: Point, d: Direction) -> u32 {
-            let stone = board[p].stone.expect("empty intersection");
+        /// Calculates the row length on the given direction at a point.
+        fn row_len(board: &Board, p: Point, stone: Stone, d: Direction) -> u32 {
             let mut res = 1;
 
             for cur_d in [d, d.opposite()].iter().copied() {
@@ -360,14 +350,18 @@ impl BoardExt for Board {
             res
         }
 
-        let mut res = 1;
-        for d in &[Right, UpRight, Up, UpLeft] {
-            let len = row_len(self, p, *d);
-            if len > res {
-                res = len;
+        if let Some(stone) = self[p].stone {
+            let mut res = 1;
+            for d in [Right, UpRight, Up, UpLeft].iter().copied() {
+                let len = row_len(self, p, stone, d);
+                if len > res {
+                    res = len;
+                }
             }
+            res
+        } else {
+            0
         }
-        res
     }
 
     fn chebyshev_dist_to_center(&self, p: Point) -> u32 {

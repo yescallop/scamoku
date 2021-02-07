@@ -4,22 +4,35 @@ use super::board::*;
 use super::game::*;
 
 use anyhow::*;
-pub trait Rule: Send + 'static {
+
+/// An interface for a rule.
+pub trait Rule: Send + Sync + 'static {
+    /// Returns the ID of the rule.
     fn id(&self) -> String;
 
+    /// Returns the variant of the rule.
     fn variant(&self) -> Variant;
 
+    /// Processes a move.
     fn process_move(&self, ctrl: &mut Control, side: Side, p: Point, index: u32) -> Result<()>;
 
+    /// Processes a choice.
     fn process_choice(&self, ctrl: &mut Control, choice: usize);
 
+    /// Initiates the game.
     fn init(&self, _ctrl: &mut Control) {}
 }
 
+/// A variant of gomoku, which also serves as a rule.
+///
+/// Reference: https://en.wikipedia.org/wiki/Gomoku#Variations
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Variant {
+    /// Standard Gomoku
     StandardGomoku,
+    /// Freestyle Gomoku
     FreestyleGomoku,
+    /// Standard Renju
     StandardRenju,
 }
 
@@ -49,18 +62,18 @@ impl Rule for Variant {
 }
 
 impl Variant {
-    /// Judges the move at the given point and ends the game
+    /// Judges the move at a point and ends the game
     /// if there's a win for the given stone.
-    pub fn judge(self, ctrl: &mut Control, p: Point, side: Side, _stone: Stone) {
+    pub fn judge(self, ctrl: &mut Control, p: Point, side: Side, stone: Stone) {
         let board = ctrl.board();
         match self {
             Variant::StandardGomoku => {
-                if board.longest_row_len(p) == 5 {
+                if board[p].stone() == Some(stone) && board.longest_row_len(p) == 5 {
                     ctrl.end(GameResultKind::RowCompleted, Some(side));
                 }
             }
             Variant::FreestyleGomoku => {
-                if board.longest_row_len(p) >= 5 {
+                if board[p].stone() == Some(stone) && board.longest_row_len(p) >= 5 {
                     ctrl.end(GameResultKind::RowCompleted, Some(side));
                 }
             }
@@ -80,9 +93,21 @@ impl fmt::Display for Variant {
     }
 }
 
+/// The standard rules.
 pub mod standard {
     pub use super::Variant::*;
     use super::*;
+
+    pub const LIST: [&'static dyn Rule; 8] = [
+        &StandardGomoku,
+        &FreestyleGomoku,
+        &StandardRenju,
+        &Pro,
+        &LongPro,
+        &Swap,
+        &Swap2,
+        &ChineseSwap,
+    ];
 
     pub struct Pro;
 
@@ -180,6 +205,7 @@ pub mod standard {
             ctrl.end_opening();
         }
     }
+
     pub struct Swap2;
 
     impl Rule for Swap2 {
@@ -219,6 +245,7 @@ pub mod standard {
             }
         }
     }
+
     pub struct ChineseSwap;
 
     impl Rule for ChineseSwap {
