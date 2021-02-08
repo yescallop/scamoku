@@ -29,7 +29,7 @@ fn standard_gomoku() {
         join_handle.join().unwrap(),
         GameResult {
             kind: GameResultKind::RowCompleted,
-            winning_side: Some((Side::First, Stone::Black)),
+            winning_side: Some(Side::First),
         }
     );
 }
@@ -52,7 +52,7 @@ fn freestyle_gomoku_raw() {
         join_handle.join().unwrap(),
         GameResult {
             kind: GameResultKind::RowCompleted,
-            winning_side: Some((Side::First, Stone::Black)),
+            winning_side: Some(Side::First),
         }
     );
 }

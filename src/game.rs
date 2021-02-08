@@ -22,7 +22,7 @@ pub enum ChoiceSet {
 }
 
 impl ChoiceSet {
-    /// Constructs a message choice set from a `Vec<&str>`.
+    /// Creates a choice set of messages from a `Vec<&str>`.
     pub fn from_msg(v: Vec<&str>) -> ChoiceSet {
         let v = v.into_iter().map(|s| s.into()).collect();
         ChoiceSet::Message(v)
@@ -72,13 +72,13 @@ impl fmt::Display for Side {
     }
 }
 
-/// Represents the result of a game.
+/// The result of a game.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct GameResult {
     /// The kind of the result.
     pub kind: GameResultKind,
     /// The winning side, or `None` for a draw.
-    pub winning_side: Option<(Side, Stone)>,
+    pub winning_side: Option<Side>,
 }
 
 /// The kind of a result, that is, why the game is ended.
@@ -136,54 +136,11 @@ struct RawPlayerMsg {
     inner: PlayerMsg,
 }
 
-/// An anonymous player message sender in a raw handle.
-pub struct AnonymousPlayerMsgSender(Sender<RawPlayerMsg>);
-
-impl AnonymousPlayerMsgSender {
-    /// Makes a move.
-    pub fn make_move(&self, p: Point) {
-        self.send(PlayerMsg::Move(Some(p), MoveAttr::Normal))
-    }
-
-    /// Passes.
-    pub fn pass(&self) {
-        self.send(PlayerMsg::Move(None, MoveAttr::Normal))
-    }
-
-    /// Claims a win in an intersection, either by moving in or for a forbidden move.
-    pub fn claim_win(&self, p: Point) {
-        self.send(PlayerMsg::WinClaim(p))
-    }
-
-    /// Makes a move and offers a draw.
-    pub fn draw_move(&self, p: Option<Point>) {
-        self.send(PlayerMsg::Move(p, MoveAttr::DrawOffer))
-    }
-
-    /// Accepts a draw offer.
-    pub fn accept_draw_offer(&self) {
-        self.send(PlayerMsg::AcceptDrawOffer)
-    }
-
-    /// Makes a choice.
-    pub fn make_choice(&self, choice: usize) {
-        self.send(PlayerMsg::Choice(choice))
-    }
-
-    fn send(&self, msg: PlayerMsg) {
-        let res = self.0.send(RawPlayerMsg {
-            side: None,
-            inner: msg,
-        });
-        drop(res);
-    }
-}
-
 /// A message sender for player.
 ///
 /// Drop the sender to disconnect from the game.
 pub struct PlayerMsgSender {
-    side: Side,
+    side: Option<Side>,
     inner: Sender<RawPlayerMsg>,
 }
 
@@ -204,8 +161,8 @@ impl PlayerMsgSender {
     }
 
     /// Makes a move and offers a draw.
-    pub fn draw_move(&self, p: Option<Point>) {
-        self.send(PlayerMsg::Move(p, MoveAttr::DrawOffer))
+    pub fn draw_move(&self, p: Point) {
+        self.send(PlayerMsg::Move(Some(p), MoveAttr::DrawOffer))
     }
 
     /// Accepts a draw offer.
@@ -220,7 +177,7 @@ impl PlayerMsgSender {
 
     fn send(&self, msg: PlayerMsg) {
         let res = self.inner.send(RawPlayerMsg {
-            side: Some(self.side),
+            side: self.side,
             inner: msg,
         });
         drop(res);
@@ -229,7 +186,10 @@ impl PlayerMsgSender {
 
 impl Drop for PlayerMsgSender {
     fn drop(&mut self) {
-        self.send(PlayerMsg::Disconnect);
+        // Do not send a message if the sender is anonymous.
+        if self.side.is_some() {
+            self.send(PlayerMsg::Disconnect);
+        }
     }
 }
 
@@ -363,11 +323,11 @@ impl Builder {
         let (p_msg_tx, msg_rx) = channel();
         let p_msg_txs = (
             PlayerMsgSender {
-                side: Side::First,
+                side: Some(Side::First),
                 inner: p_msg_tx.clone(),
             },
             PlayerMsgSender {
-                side: Side::Second,
+                side: Some(Side::Second),
                 inner: p_msg_tx,
             },
         );
@@ -404,7 +364,10 @@ impl Builder {
         let join_handle = thread::spawn(move || Control::new(self, None, msg_rx, event_tx).start());
 
         RawHandle {
-            msg_tx: AnonymousPlayerMsgSender(msg_tx),
+            msg_tx: PlayerMsgSender {
+                side: None,
+                inner: msg_tx,
+            },
             event_rx,
             join_handle,
         }
@@ -414,7 +377,7 @@ impl Builder {
 /// A raw handle of game.
 pub struct RawHandle {
     /// An anonymous sender for player messages.
-    pub msg_tx: AnonymousPlayerMsgSender,
+    pub msg_tx: PlayerMsgSender,
     /// A receiver of game events.
     pub event_rx: Receiver<Event>,
     /// A handle to join on the game thread, which returns the result.
@@ -439,36 +402,56 @@ pub fn start_with_rule(rule: &'static dyn Rule) -> Handle {
 
 /// Provides control over a game.
 pub struct Control {
+    /// The message senders, or `None` if started raw.
     msg_txs: Option<(Sender<Msg>, Sender<Msg>)>,
+    /// The message receiver.
     msg_rx: Receiver<RawPlayerMsg>,
+    /// The event sender.
     event_tx: Sender<Event>,
 
+    /// The board.
     board: Board,
+    /// The maximum move index on the board, which equals to `size * size`.
     max_move_index: u32,
 
+    /// A static reference to the rule.
     rule: &'static dyn Rule,
+    /// The rule data.
     rule_data: Option<Box<dyn Any>>,
+    /// Whether the game is in the opening.
     in_opening: bool,
+    /// Whether the game is strict.
     strict: bool,
 
+    /// The current side of the game.
     cur_side: Side,
+    /// The current stone of the game.
     cur_stone: Stone,
 
+    /// The timeout for moves.
     move_timeout: Option<Duration>,
+    /// The timeout for the game.
     game_timeout: Option<Duration>,
+    /// The game timer, or `None` if there is no timeout for the game.
     game_timer: Option<[Duration; 2]>,
 
-    request_required: bool,
+    /// The start and deadline time of a request, or `None` if there is no timeout.
     start_deadline: Option<(Instant, Instant)>,
 
+    /// The current choice index, or `0` if no choice has ever been requested.
     cur_choice_index: u32,
+    /// The choice data, or `None` if no choice is being requested.
     choice_data: Option<(Side, ChoiceSet)>,
 
+    /// The offered moves, or `None` if no move has been offered.
     offered_moves: Option<Vec<Point>>,
 
-    last_pass: bool,
-    last_draw_offer: bool,
+    /// The kind of last move.
+    ///
+    /// `None` for a pass, `Some(MoveAttr)` for an actual move.
+    last_move_kind: Option<MoveAttr>,
 
+    /// The result of the game, or `None` if the game is not ended.
     result: Option<GameResult>,
 }
 
@@ -496,13 +479,11 @@ impl Control {
             move_timeout: builder.move_timeout,
             game_timeout: builder.game_timeout,
             game_timer: builder.game_timeout.map(|d| [d, d]),
-            request_required: true,
             start_deadline: None,
             cur_choice_index: 0,
             choice_data: None,
             offered_moves: None,
-            last_pass: false,
-            last_draw_offer: false,
+            last_move_kind: Some(MoveAttr::Normal),
             result: None,
         }
     }
@@ -612,11 +593,12 @@ impl Control {
         if self.result.is_none() {
             self.result = Some(GameResult {
                 kind,
-                winning_side: Some((winning_side, self.stone_by_side(winning_side))),
+                winning_side: Some(winning_side),
             });
         }
     }
 
+    /// Ends the game in a draw with the given result.
     pub fn end_draw(&mut self, kind: GameResultKind) {
         if self.result.is_none() {
             self.result = Some(GameResult {
@@ -680,9 +662,6 @@ impl Control {
 
     /// Starts the game.
     fn start(mut self) -> GameResult {
-        // Initiate the rule in the first place.
-        self.rule.init(&mut self);
-
         // Broadcast the game settings.
         let settings = GameSettings {
             rule_id: self.rule.id(),
@@ -695,6 +674,9 @@ impl Control {
         self.msg_both(Msg::GameStart(settings.clone()));
         self.event(Event::GameStart(settings));
 
+        // Initiate the game with the rule.
+        self.rule.init(&mut self);
+
         // Loop until the game is ended.
         while self.result.is_none() {
             if self.board.cur_move_index() == self.max_move_index {
@@ -703,18 +685,37 @@ impl Control {
                 break;
             }
 
-            // Request firstly a choice, and secondly a move.
+            // Request a choice before a move.
             let side = self
                 .choice_data
                 .as_ref()
                 .map(|d| d.0)
                 .unwrap_or(self.cur_side);
 
-            // Deadline should be updated before making a request.
-            let timeout = self.calc_timeout_and_update_deadline(side);
-            if self.request_required {
-                self.make_request();
-            }
+            let now = Instant::now();
+            // Calculate the timeout.
+            let timeout = match self.start_deadline {
+                // Move or choice is being requested. Reuse the deadline.
+                Some((_, deadline)) => Some(deadline - now),
+                None => {
+                    // Update the deadline and make a new request.
+                    let game_timeout = self.game_timer.map(|t| t[side.ord()]);
+                    // Take the minimum.
+                    let timeout = match (game_timeout, self.move_timeout) {
+                        (None, None) => None,
+                        (Some(t), None) | (None, Some(t)) => Some(t),
+                        (Some(t1), Some(t2)) => Some(t1.min(t2)),
+                    };
+                    self.start_deadline = timeout.map(|t| (now, now + t));
+                    if let Some((_, deadline)) = self.start_deadline {
+                        // Broadcast the updated deadline.
+                        self.msg(side, Msg::DeadlineUpdate(deadline));
+                        self.event(Event::DeadlineUpdate(side, deadline));
+                    }
+                    self.make_request();
+                    timeout
+                }
+            };
 
             let res = if let Some(t) = timeout {
                 self.msg_rx.recv_timeout(t)
@@ -767,35 +768,9 @@ impl Control {
             self.msg(side, Msg::MoveRequest(offer_ord));
             self.event(Event::MoveRequest(side, offer_ord));
         }
-        self.request_required = false;
     }
 
-    /// Calculates the timeout and updates the deadline for a side.
-    fn calc_timeout_and_update_deadline(&mut self, side: Side) -> Option<Duration> {
-        let ord = side.ord();
-        let now = Instant::now();
-        match self.start_deadline {
-            // Move or choice is already requested.
-            Some((_, deadline)) => Some(deadline - now),
-            None => {
-                let game_timeout = self.game_timer.map(|t| t[ord]);
-                let timeout = match (game_timeout, self.move_timeout) {
-                    (None, None) => None,
-                    (None, Some(t)) => Some(t),
-                    (Some(t), None) => Some(t),
-                    (Some(t1), Some(t2)) => Some(t1.min(t2)),
-                };
-                self.start_deadline = timeout.map(|t| (now, now + t));
-                if let Some((_, deadline)) = self.start_deadline {
-                    self.msg(side, Msg::DeadlineUpdate(deadline));
-                    self.event(Event::DeadlineUpdate(side, deadline));
-                }
-                timeout
-            }
-        }
-    }
-
-    /// Stop the timer of a side.
+    /// Stops the timer of a side.
     fn stop_timer(&mut self, side: Side) {
         if let Some((start, _)) = self.start_deadline.take() {
             let elapsed = start.elapsed();
@@ -804,22 +779,13 @@ impl Control {
                 *t = t.checked_sub(elapsed).unwrap_or_default()
             }
         }
-        // Request required because the last request was finished.
-        self.request_required = true;
     }
 
     /// Processes a message.
     fn process_msg(&mut self, side: Side, msg: PlayerMsg) -> Result<()> {
         self.event(Event::PlayerMsg(side, msg));
         match msg {
-            PlayerMsg::Move(p, attr) => {
-                ensure!(self.cur_side == side, "not your turn to move");
-                if let Err(e) = self.process_move(side, p, attr) {
-                    // Request required to remind the user to make a valid move.
-                    self.request_required = true;
-                    return Err(e);
-                }
-            }
+            PlayerMsg::Move(p, attr) => self.process_move(side, p, attr)?,
             PlayerMsg::WinClaim(p) => {
                 ensure!(!self.strict, "win claim is unavailable in strict mode");
                 ensure!(!self.in_opening, "win claim in the opening");
@@ -841,20 +807,15 @@ impl Control {
                         ensure!(s == side, "not your turn to make a choice");
                         set
                     }
-                    None => {
-                        if self.cur_side == side {
-                            // Request required to remind the user to make a move instead.
-                            self.request_required = true;
-                        }
-                        bail!("no choice is requested");
-                    }
+                    None => bail!("no choice is requested"),
                 };
 
-                if !choice_set.contains_index(choice) {
-                    // Request required to remind the user to make a valid choice.
-                    self.request_required = true;
-                    bail!("invalid choice: {} for {:?}", choice, choice_set);
-                }
+                ensure!(
+                    choice_set.contains_index(choice),
+                    "invalid choice: {} for {:?}",
+                    choice,
+                    choice_set
+                );
 
                 self.stop_timer(side);
 
@@ -869,7 +830,7 @@ impl Control {
             }
             PlayerMsg::AcceptDrawOffer => {
                 ensure!(
-                    self.last_draw_offer && side == self.cur_side,
+                    self.last_move_kind == Some(MoveAttr::DrawOffer) && side == self.cur_side,
                     "inappropriate draw offer acceptance"
                 );
                 self.end_draw(GameResultKind::DrawOfferAccepted);
@@ -881,6 +842,7 @@ impl Control {
 
     /// Processes a move.
     fn process_move(&mut self, side: Side, p: Option<Point>, attr: MoveAttr) -> Result<()> {
+        ensure!(self.cur_side == side, "not your turn to move");
         ensure!(self.choice_data.is_none(), "make your choice before moving");
 
         // An offered move
@@ -895,10 +857,10 @@ impl Control {
                 "moving into an occupied intersection: {}",
                 p
             );
-            for it in v.iter() {
-                ensure!(*it != p, "duplicate move offer: {}", p);
+            for it in v.iter().copied() {
+                ensure!(it != p, "duplicate move offer: {}", p);
                 ensure!(
-                    !self.board.is_symmetrical(*it, p),
+                    !self.board.is_symmetrical(it, p),
                     "symmetrical move offer: {} -> {}",
                     it,
                     p
@@ -917,7 +879,7 @@ impl Control {
 
         if attr == MoveAttr::DrawOffer {
             ensure!(!self.in_opening, "draw offer in the opening");
-            self.last_draw_offer = true;
+            self.last_move_kind = Some(MoveAttr::DrawOffer);
         }
 
         if let Some(p) = p {
@@ -930,7 +892,7 @@ impl Control {
                 "moving into an occupied intersection: {}",
                 p
             );
-            self.last_pass = false;
+            self.last_move_kind = None;
 
             // Record the current stone because it'll be switched.
             let stone = self.cur_stone;
@@ -948,10 +910,10 @@ impl Control {
             }
         } else {
             ensure!(!self.in_opening, "pass in the opening");
-            if self.last_pass {
+            if self.last_move_kind.is_none() {
                 self.end_draw(GameResultKind::BothPass);
             }
-            self.last_pass = true;
+            self.last_move_kind = None;
 
             self.stop_timer(side);
             self.make_move(side, self.cur_stone, None, attr);

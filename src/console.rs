@@ -58,8 +58,8 @@ pub fn log_events(event_rx: Receiver<Event>) {
             }
             Event::GameEnd(res) => {
                 println!("----- GAME ENDED -----");
-                if let Some((side, stone)) = res.winning_side {
-                    println!("The winner: {} ({})", side, stone);
+                if let Some(side) = res.winning_side {
+                    println!("The winner: {}", side);
                 } else {
                     println!("The game ended in a draw.");
                 }

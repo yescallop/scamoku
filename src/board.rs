@@ -13,7 +13,7 @@ pub struct Point {
 }
 
 impl Point {
-    /// Constructs a new `Point` with the given coordinates.
+    /// Creates a new `Point` with the given coordinates.
     pub fn new(x: u32, y: u32) -> Point {
         Point { x, y }
     }
@@ -70,11 +70,7 @@ impl fmt::Display for Point {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.x < 26 {
             // Avoid unnecessary calculations for x < 26
-            return f.write_fmt(format_args!(
-                "{}{}",
-                (b'A' + self.x as u8) as char,
-                self.y + 1
-            ));
+            return write!(f, "{}{}", (b'A' + self.x as u8) as char, self.y + 1);
         }
 
         let mut v = Vec::with_capacity(2);
@@ -88,12 +84,13 @@ impl fmt::Display for Point {
             x -= 1;
         }
         v.reverse();
-        f.write_fmt(format_args!(
+        write!(
+            f,
             "{}{}",
             // SAFETY: The bytes are all ASCII thus valid UTF-8 and reversible.
             unsafe { String::from_utf8_unchecked(v) },
             self.y + 1
-        ))
+        )
     }
 }
 
@@ -161,7 +158,10 @@ pub struct Board {
 }
 
 impl Board {
-    /// Constructs a new `Board` with the specified size.
+    /// Creates a new `Board` with the given `size`.
+    ///
+    /// # Panics
+    /// Panics if the `size` is less than 5 or even.
     pub fn new(size: u32) -> Self {
         assert!(size >= 5, "size < 5");
         assert!(size % 2 == 1, "even size: {}", size);
@@ -262,22 +262,37 @@ impl Direction {
 /// The extensions for a board.
 pub trait BoardExt {
     /// Makes a move on the board.
+    ///
+    /// # Panics
+    /// Panics when moving out of board or into an occupied intersection.
     fn make_move(&mut self, p: Point, stone: Stone);
 
     /// Tests if two points are symmetrical on the board.
+    ///
+    /// # Panics
+    /// Panics if any of the points is out of board.
     fn is_symmetrical(&self, p1: Point, p2: Point) -> bool;
 
     /// Returns the adjacent point on the given direction of a point.
     ///
     /// `None` is returned when reaching out of board.
+    ///
+    /// # Panics
+    /// Panics if the point is out of board.
     fn adjacent(&self, p: Point, d: Direction) -> Option<Point>;
 
-    /// Returns the length of the longest row at a point, or 0 if empty.
+    /// Returns the length of the longest row at a point, or `0` if empty.
+    ///
+    /// # Panics
+    /// Panics if the point is out of board.
     fn longest_row_len(&self, p: Point) -> u32;
 
     /// Returns the [Chebyshev distance][1] from a point to the board center.
     ///
     /// [1]: https://en.wikipedia.org/wiki/Chebyshev_distance
+    ///
+    /// # Panics
+    /// Panics if the point is out of board.
     fn chebyshev_dist_to_center(&self, p: Point) -> u32;
 }
 
@@ -311,6 +326,9 @@ impl BoardExt for Board {
 
     fn adjacent(&self, p: Point, d: Direction) -> Option<Point> {
         let (x, y) = (p.x, p.y);
+        let size = self.size();
+        assert!(x < size && y < size, "out of board");
+
         let res = match d {
             Up => (Some(x), Some(y + 1)),
             UpRight => (Some(x + 1), Some(y + 1)),
@@ -336,6 +354,7 @@ impl BoardExt for Board {
             for cur_d in [d, d.opposite()].iter().copied() {
                 let mut cur_p = p;
                 loop {
+                    // Should panic here if out of board.
                     cur_p = match board.adjacent(cur_p, cur_d) {
                         Some(p) => p,
                         None => break,
