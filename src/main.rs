@@ -1,3 +1,5 @@
+mod console;
+
 fn main() {
-    scamoku::console::run()
+    console::run()
 }

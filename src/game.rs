@@ -1,16 +1,19 @@
 use crate::board::*;
 use crate::rule::*;
 
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::{any::Any, thread};
 use std::{
     fmt,
     time::{Duration, Instant},
 };
+use std::{
+    mem::replace,
+    sync::mpsc::{channel, Receiver, RecvError, RecvTimeoutError, Sender},
+};
 
 use anyhow::*;
 
-/// A set of choices that can be made by a player.
+/// A set of choices that a player can choose from.
 #[derive(Debug, Clone)]
 pub enum ChoiceSet {
     /// Messages.
@@ -18,12 +21,15 @@ pub enum ChoiceSet {
     /// Moves.
     Move(Vec<Point>),
     /// Move count ranging from 1 to `max_count`.
-    MoveCount { max_count: usize },
+    MoveCount {
+        /// The maximum move count.
+        max_count: usize,
+    },
 }
 
 impl ChoiceSet {
     /// Creates a choice set of messages from a `Vec<&str>`.
-    pub fn from_msg(v: Vec<&str>) -> ChoiceSet {
+    pub fn from_msgs(v: Vec<&str>) -> ChoiceSet {
         let v = v.into_iter().map(|s| s.into()).collect();
         ChoiceSet::Message(v)
     }
@@ -33,14 +39,17 @@ impl ChoiceSet {
         match self {
             ChoiceSet::Message(v) => i < v.len(),
             ChoiceSet::Move(v) => i < v.len(),
-            ChoiceSet::MoveCount { max_count } => i >= 1 && i <= *max_count,
+            ChoiceSet::MoveCount { max_count } => i >= 2 && i <= *max_count,
         }
     }
 }
+
 /// The side of a player.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Side {
+    /// The side of the player to move first.
     First,
+    /// The side of the player to move second.
     Second,
 }
 
@@ -100,15 +109,17 @@ pub enum GameResultKind {
     BothPass,
     /// Player disconnected.
     PlayerDisconnect,
-    /// Draw offer has been accepted.
+    /// A draw offer has been accepted.
     DrawOfferAccepted,
 }
 
 /// A message sent through a channel from a player thread to the game thread.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub enum PlayerMsg {
-    /// An actual move or a pass, with an attribute of a draw offer or a win claim.
+    /// An actual move or a pass, optionally with a draw offer.
     Move(Option<Point>, MoveAttr),
+    /// A set of offered moves.
+    OfferedMoves(Vec<Point>),
     /// Claims a win in an intersection, either by moving in or for a forbidden move.
     WinClaim(Point),
     /// A choice of index in the choice set provided.
@@ -148,6 +159,11 @@ impl PlayerMsgSender {
     /// Makes a move.
     pub fn make_move(&self, p: Point) {
         self.send(PlayerMsg::Move(Some(p), MoveAttr::Normal))
+    }
+
+    /// Offers a set of moves.
+    pub fn offer_moves(&self, v: Vec<Point>) {
+        self.send(PlayerMsg::OfferedMoves(v))
     }
 
     /// Passes.
@@ -193,62 +209,88 @@ impl Drop for PlayerMsgSender {
     }
 }
 
-/// The ordinal and total of a set of offered moves.
-#[derive(Debug, Copy, Clone)]
-pub struct OfferOrd {
-    pub ord: usize,
-    pub total: usize,
-}
-
 /// A message sent through a channel from the game thread to a player thread.
 #[derive(Debug, Clone)]
 pub enum Msg {
     /// Game started with settings.
-    GameStart(GameSettings),
-    /// Move requested with an optional `OfferOrd`.
-    MoveRequest(Option<OfferOrd>),
+    GameStart(Settings, Side),
+    /// Move requested with the optional count of remaining moves to offer.
+    MoveRequest(Option<usize>),
     /// Choice requested.
     ChoiceRequest(ChoiceSet),
-    /// Deadline updated.
-    DeadlineUpdate(Instant),
-    /// Move made by the opponent.
-    OpponentMove(Option<Point>, MoveAttr),
+    /// Timer updated. A field is updated if it's `Some`.
+    TimerUpdate {
+        /// The deadline for next move / choice.
+        deadline: Option<Instant>,
+        /// The remaining time on the timer.
+        remaining: Option<Duration>,
+    },
+    /// Move made.
+    Move(Option<Point>, MoveAttr),
     /// Stone swapped.
     StoneSwap,
     /// Game ended with a result.
     GameEnd(GameResult),
     /// Error occurred by yourself.
-    Error(PlayerMsg, String),
+    Error(String),
 }
 
 /// An event of the game.
 #[derive(Debug, Clone)]
 pub enum Event {
     /// Game started with settings.
-    GameStart(GameSettings),
-    /// Move requested with an optional `OfferOrd`.
-    MoveRequest(Side, Option<OfferOrd>),
+    GameStart(Settings),
+    /// Move requested with the optional count of remaining moves to offer.
+    MoveRequest(Option<usize>),
     /// Choice requested.
     ChoiceRequest(Side, ChoiceSet),
-    /// Deadline updated.
-    DeadlineUpdate(Side, Instant),
-    /// Message sent by a player.
-    PlayerMsg(Side, PlayerMsg),
+    /// Timer updated. A field is updated if it's `Some`.
+    TimerUpdate {
+        /// The side of which the timer is updated.
+        side: Side,
+        /// The deadline for next move / choice.
+        deadline: Option<Instant>,
+        /// The remaining time on the timer.
+        remaining: Option<Duration>,
+    },
     /// Move made by a player.
-    Move(Side, Stone, Option<Point>, MoveAttr),
+    Move(Option<Point>, MoveAttr),
     /// Choice made by a player.
-    Choice(Side, ChoiceSet, usize),
+    Choice(usize),
     /// Stone swapped.
     StoneSwap,
     /// Game ended with a result.
     GameEnd(GameResult),
     /// Error occurred by a player.
-    Error(Side, PlayerMsg, String),
+    Error(Side, String),
+}
+
+impl Event {
+    /// Creates an `Event` from a `Msg` and its side.
+    pub fn from_msg(msg: Msg, side: Side) -> Event {
+        match msg {
+            Msg::GameStart(settings, _) => Event::GameStart(settings),
+            Msg::MoveRequest(ord) => Event::MoveRequest(ord),
+            Msg::ChoiceRequest(set) => Event::ChoiceRequest(side, set),
+            Msg::TimerUpdate {
+                deadline,
+                remaining,
+            } => Event::TimerUpdate {
+                side,
+                deadline,
+                remaining,
+            },
+            Msg::Move(p, attr) => Event::Move(p, attr),
+            Msg::StoneSwap => Event::StoneSwap,
+            Msg::GameEnd(res) => Event::GameEnd(res),
+            Msg::Error(msg) => Event::Error(side, msg),
+        }
+    }
 }
 
 /// The settings of a game.
 #[derive(Debug, Clone)]
-pub struct GameSettings {
+pub struct Settings {
     /// The ID of the rule.
     pub rule_id: String,
     /// The variant of the rule.
@@ -395,9 +437,15 @@ pub struct Handle {
     // pub interrupt_tx: Sender<()>,
 }
 
-/// Starts a game with a rule and default settings.
-pub fn start_with_rule(rule: &'static dyn Rule) -> Handle {
-    Builder::with_rule(rule).start()
+enum State {
+    PendingMove,
+    /// Processing a choice.
+    ///
+    /// This state allows more choices to be successively
+    /// requested after `end_opening` is called.
+    ProcessingChoice,
+    PendingMoveOffer(Vec<Point>),
+    PendingChoice(Side, ChoiceSet),
 }
 
 /// Provides control over a game.
@@ -411,13 +459,13 @@ pub struct Control {
 
     /// The board.
     board: Board,
-    /// The maximum move index on the board, which equals to `size * size`.
+    /// The maximum move index on the board, which equals to `size * size - 1`.
     max_move_index: u32,
 
     /// A static reference to the rule.
     rule: &'static dyn Rule,
     /// The rule data.
-    rule_data: Option<Box<dyn Any>>,
+    rule_data: Box<dyn Any>,
     /// Whether the game is in the opening.
     in_opening: bool,
     /// Whether the game is strict.
@@ -440,11 +488,9 @@ pub struct Control {
 
     /// The current choice index, or `0` if no choice has ever been requested.
     cur_choice_index: u32,
-    /// The choice data, or `None` if no choice is being requested.
-    choice_data: Option<(Side, ChoiceSet)>,
 
-    /// The offered moves, or `None` if no move has been offered.
-    offered_moves: Option<Vec<Point>>,
+    /// The current state.
+    state: State,
 
     /// The kind of last move.
     ///
@@ -471,7 +517,7 @@ impl Control {
             board,
             max_move_index: size * size - 1,
             rule: builder.rule,
-            rule_data: None,
+            rule_data: Box::new(()),
             in_opening: true,
             strict: builder.strict,
             cur_side: Side::First,
@@ -481,8 +527,7 @@ impl Control {
             game_timer: builder.game_timeout.map(|d| [d, d]),
             start_deadline: None,
             cur_choice_index: 0,
-            choice_data: None,
-            offered_moves: None,
+            state: State::PendingMove,
             last_move_kind: Some(MoveAttr::Normal),
             result: None,
         }
@@ -493,10 +538,9 @@ impl Control {
         &self.board
     }
 
-    /// Initiates the rule data.
-    pub fn init_rule_data(&mut self, data: impl Any) {
-        assert!(self.rule_data.is_none());
-        self.rule_data = Some(Box::new(data));
+    /// Sets the rule data.
+    pub fn set_rule_data(&mut self, data: impl Any) {
+        self.rule_data = Box::new(data);
     }
 
     /// Returns the rule data.
@@ -504,11 +548,7 @@ impl Control {
     /// # Panics
     /// Panics if the rule data is uninitialized or data type mismatches.
     pub fn rule_data<T: Any>(&mut self) -> &mut T {
-        self.rule_data
-            .as_deref_mut()
-            .expect("rule data uninitialized")
-            .downcast_mut()
-            .expect("data type mismatch")
+        self.rule_data.downcast_mut().expect("data type mismatch")
     }
 
     /// Returns `true` if the game is strict.
@@ -556,7 +596,7 @@ impl Control {
     pub fn end_opening(&mut self) {
         assert!(self.in_opening);
         self.in_opening = false;
-        self.rule_data = None;
+        self.rule_data = Box::new(());
     }
 
     /// Swaps the stones.
@@ -569,14 +609,13 @@ impl Control {
         self.msg_both(Msg::StoneSwap);
         self.event(Event::StoneSwap);
     }
-
     /// Requests a move offer of the given `count`.
     ///
     /// # Panics
-    /// Panics if the game is not in the opening or the `count` is zero.
+    /// Panics if the game is not in the opening, the `count` is zero, or a move offer has already been requested.
     pub fn request_move_offer(&mut self, count: usize) {
         assert!(self.in_opening && count != 0);
-        self.offered_moves = Some(Vec::with_capacity(count));
+        self.state = State::PendingMoveOffer(Vec::with_capacity(count));
     }
 
     /// Requests a choice.
@@ -584,8 +623,15 @@ impl Control {
     /// # Panics
     /// Panics if the game is not in the opening or a choice has already been requested,
     pub fn request_choice(&mut self, side: Side, choice_set: ChoiceSet) {
-        assert!(self.in_opening && self.choice_data.is_none());
-        self.choice_data = Some((side, choice_set));
+        assert!(
+            self.in_opening
+                || matches!(
+                    self.state,
+                    State::ProcessingChoice | State::PendingMoveOffer(_)
+                )
+        );
+        self.state = State::PendingChoice(side, choice_set);
+        self.cur_choice_index += 1;
     }
 
     /// Ends the game with the given result.
@@ -638,9 +684,9 @@ impl Control {
     }
 
     /// Broadcasts an error.
-    fn err(&mut self, side: Side, player_msg: PlayerMsg, msg: String) {
-        self.msg(side, Msg::Error(player_msg, msg.clone()));
-        self.event(Event::Error(side, player_msg, msg));
+    fn err(&mut self, side: Side, msg: String) {
+        self.msg(side, Msg::Error(msg.clone()));
+        self.event(Event::Error(side, msg));
     }
 
     /// Switches the turn.
@@ -651,19 +697,19 @@ impl Control {
 
     /// Makes a move on the board if it is not a pass,
     /// switches the turn and broadcasts it.
-    fn make_move(&mut self, side: Side, stone: Stone, p: Option<Point>, attr: MoveAttr) {
+    fn make_move(&mut self, stone: Stone, p: Option<Point>, attr: MoveAttr) {
         if let Some(p) = p {
             self.board.make_move(p, stone);
         }
         self.switch();
-        self.msg(side.opposite(), Msg::OpponentMove(p, attr));
-        self.event(Event::Move(side, stone, p, attr));
+        self.msg_both(Msg::Move(p, attr));
+        self.event(Event::Move(p, attr));
     }
 
     /// Starts the game.
     fn start(mut self) -> GameResult {
         // Broadcast the game settings.
-        let settings = GameSettings {
+        let settings = Settings {
             rule_id: self.rule.id(),
             variant: self.rule.variant(),
             board_size: self.board.size(),
@@ -671,7 +717,8 @@ impl Control {
             game_timeout: self.game_timeout,
             strict: self.strict,
         };
-        self.msg_both(Msg::GameStart(settings.clone()));
+        self.msg(Side::First, Msg::GameStart(settings.clone(), Side::First));
+        self.msg(Side::Second, Msg::GameStart(settings.clone(), Side::Second));
         self.event(Event::GameStart(settings));
 
         // Initiate the game with the rule.
@@ -686,11 +733,10 @@ impl Control {
             }
 
             // Request a choice before a move.
-            let side = self
-                .choice_data
-                .as_ref()
-                .map(|d| d.0)
-                .unwrap_or(self.cur_side);
+            let side = match self.state {
+                State::PendingChoice(side, _) => side,
+                _ => self.cur_side,
+            };
 
             let now = Instant::now();
             // Calculate the timeout.
@@ -706,11 +752,22 @@ impl Control {
                         (Some(t), None) | (None, Some(t)) => Some(t),
                         (Some(t1), Some(t2)) => Some(t1.min(t2)),
                     };
-                    self.start_deadline = timeout.map(|t| (now, now + t));
-                    if let Some((_, deadline)) = self.start_deadline {
+                    if let Some(timeout) = timeout {
+                        let deadline = now + timeout;
+                        self.start_deadline = Some((now, deadline));
                         // Broadcast the updated deadline.
-                        self.msg(side, Msg::DeadlineUpdate(deadline));
-                        self.event(Event::DeadlineUpdate(side, deadline));
+                        self.msg(
+                            side,
+                            Msg::TimerUpdate {
+                                deadline: Some(deadline),
+                                remaining: None,
+                            },
+                        );
+                        self.event(Event::TimerUpdate {
+                            side,
+                            deadline: Some(deadline),
+                            remaining: None,
+                        });
                     }
                     self.make_request();
                     timeout
@@ -731,7 +788,7 @@ impl Control {
                     // If sent by an anonymous sender, a message should belong to the side requested.
                     let msg_side = msg.side.unwrap_or(side);
                     if let Err(e) = self.process_msg(msg_side, msg.inner) {
-                        self.err(msg_side, msg.inner, e.to_string());
+                        self.err(msg_side, e.to_string());
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
@@ -755,18 +812,20 @@ impl Control {
     /// Makes a request, either for a choice or a move.
     fn make_request(&mut self) {
         // Here we clone the choice data since the request might fail.
-        if let Some((side, choice_set)) = self.choice_data.clone() {
-            self.msg(side, Msg::ChoiceRequest(choice_set.clone()));
-            self.event(Event::ChoiceRequest(side, choice_set));
+        if let State::PendingChoice(side, ref set) = self.state {
+            let set = set.clone();
+            self.msg(side, Msg::ChoiceRequest(set.clone()));
+            self.event(Event::ChoiceRequest(side, set));
         } else {
             // Request a move.
             let side = self.cur_side;
-            let offer_ord = self.offered_moves.as_ref().map(|v| OfferOrd {
-                ord: v.len(),
-                total: v.capacity(),
-            });
-            self.msg(side, Msg::MoveRequest(offer_ord));
-            self.event(Event::MoveRequest(side, offer_ord));
+            let remaining = if let State::PendingMoveOffer(v) = &self.state {
+                Some(v.capacity() - v.len())
+            } else {
+                None
+            };
+            self.msg(side, Msg::MoveRequest(remaining));
+            self.event(Event::MoveRequest(remaining));
         }
     }
 
@@ -776,16 +835,48 @@ impl Control {
             let elapsed = start.elapsed();
             let ord = side.ord();
             if let Some(t) = &mut self.game_timer.map(|t| t[ord]) {
-                *t = t.checked_sub(elapsed).unwrap_or_default()
+                let remaining = t.checked_sub(elapsed).unwrap_or_default();
+                *t = remaining;
+
+                // Broadcast the updated timer.
+                self.msg(
+                    side,
+                    Msg::TimerUpdate {
+                        deadline: None,
+                        remaining: Some(remaining),
+                    },
+                );
+                self.event(Event::TimerUpdate {
+                    side,
+                    deadline: None,
+                    remaining: Some(remaining),
+                });
             }
         }
     }
 
     /// Processes a message.
     fn process_msg(&mut self, side: Side, msg: PlayerMsg) -> Result<()> {
-        self.event(Event::PlayerMsg(side, msg));
         match msg {
             PlayerMsg::Move(p, attr) => self.process_move(side, p, attr)?,
+            PlayerMsg::OfferedMoves(offered) => {
+                if let State::PendingMoveOffer(v) = &mut self.state {
+                    ensure!(v.is_empty(), "some move has been offered alone");
+                    ensure!(v.capacity() == offered.len(), "move count mismatch");
+
+                    for &p in &offered {
+                        if let Err(e) = Self::process_move_offer(&self.board, v, p) {
+                            v.clear();
+                            return Err(e);
+                        }
+                    }
+
+                    self.stop_timer(side);
+                    self.request_choice(side.opposite(), ChoiceSet::Move(offered));
+                } else {
+                    bail!("no move offer requested");
+                }
+            }
             PlayerMsg::WinClaim(p) => {
                 ensure!(!self.strict, "win claim is unavailable in strict mode");
                 ensure!(!self.in_opening, "win claim in the opening");
@@ -802,12 +893,11 @@ impl Control {
                 ensure!(self.result.is_some(), "win claim was unsuccessful: {}", p);
             }
             PlayerMsg::Choice(choice) => {
-                let choice_set = match self.choice_data {
-                    Some((s, ref set)) => {
-                        ensure!(s == side, "not your turn to make a choice");
-                        set
-                    }
-                    None => bail!("no choice is requested"),
+                let choice_set = if let State::PendingChoice(s, ref set) = self.state {
+                    ensure!(s == side, "not your turn to make a choice");
+                    set
+                } else {
+                    bail!("no choice is requested")
                 };
 
                 ensure!(
@@ -818,15 +908,22 @@ impl Control {
                 );
 
                 self.stop_timer(side);
+                self.event(Event::Choice(choice));
 
-                if let Some(v) = self.offered_moves.take() {
-                    let p = v[choice];
-                    self.make_move(side, self.stone_by_side(side), Some(p), MoveAttr::Normal);
-                } else {
-                    self.rule.process_choice(self, choice);
+                if let State::PendingChoice(side, ref set) =
+                    replace(&mut self.state, State::ProcessingChoice)
+                {
+                    if let ChoiceSet::Move(v) = set {
+                        let p = v[choice];
+                        self.make_move(self.stone_by_side(side), Some(p), MoveAttr::Normal);
+                    } else {
+                        self.rule.process_choice(self, choice, side);
+                    }
                 }
-                let choice_set = self.choice_data.take().unwrap().1;
-                self.event(Event::Choice(side, choice_set, choice));
+
+                if matches!(self.state, State::ProcessingChoice) {
+                    self.state = State::PendingMove;
+                }
             }
             PlayerMsg::AcceptDrawOffer => {
                 ensure!(
@@ -843,43 +940,24 @@ impl Control {
     /// Processes a move.
     fn process_move(&mut self, side: Side, p: Option<Point>, attr: MoveAttr) -> Result<()> {
         ensure!(self.cur_side == side, "not your turn to move");
-        ensure!(self.choice_data.is_none(), "make your choice before moving");
+        ensure!(
+            !matches!(self.state, State::PendingChoice(..)),
+            "make your choice before moving"
+        );
 
         // An offered move
-        if let Some(v) = &mut self.offered_moves {
+        if let State::PendingMoveOffer(v) = &mut self.state {
             let p = p.ok_or(anyhow!("pass when offering moves"))?;
-            let int = self
-                .board
-                .get(p)
-                .ok_or(anyhow!("moving out of board: {}", p))?;
-            ensure!(
-                int.is_empty(),
-                "moving into an occupied intersection: {}",
-                p
-            );
-            for it in v.iter().copied() {
-                ensure!(it != p, "duplicate move offer: {}", p);
-                ensure!(
-                    !self.board.is_symmetrical(it, p),
-                    "symmetrical move offer: {} -> {}",
-                    it,
-                    p
-                );
-            }
-            // Save p as an offered move.
-            v.push(p);
-            // Finished
+
+            Self::process_move_offer(&self.board, v, p)?;
+
             if v.len() == v.capacity() {
+                // Finished
                 let v = v.clone();
                 self.stop_timer(side);
                 self.request_choice(side.opposite(), ChoiceSet::Move(v));
             }
             return Ok(());
-        }
-
-        if attr == MoveAttr::DrawOffer {
-            ensure!(!self.in_opening, "draw offer in the opening");
-            self.last_move_kind = Some(MoveAttr::DrawOffer);
         }
 
         if let Some(p) = p {
@@ -892,20 +970,28 @@ impl Control {
                 "moving into an occupied intersection: {}",
                 p
             );
-            self.last_move_kind = None;
 
-            // Record the current stone because it'll be switched.
+            self.last_move_kind = if attr == MoveAttr::DrawOffer {
+                ensure!(!self.in_opening, "draw offer in the opening");
+                Some(MoveAttr::DrawOffer)
+            } else {
+                Some(MoveAttr::Normal)
+            };
+
+            // Record the current stone and whether the game is in opening
+            // because they could be changed.
             let stone = self.cur_stone;
+            let in_opening = self.in_opening;
 
-            if self.in_opening {
+            if in_opening {
                 self.rule
-                    .process_move(self, side, p, self.board.cur_move_index() + 1)?;
+                    .process_move(self, p, self.board.cur_move_index() + 1)?;
             }
 
             self.stop_timer(side);
-            self.make_move(side, stone, Some(p), attr);
+            self.make_move(stone, Some(p), attr);
 
-            if !self.in_opening && self.strict {
+            if !in_opening && self.strict {
                 self.rule.variant().judge(self, p, side, stone);
             }
         } else {
@@ -916,8 +1002,178 @@ impl Control {
             self.last_move_kind = None;
 
             self.stop_timer(side);
-            self.make_move(side, self.cur_stone, None, attr);
+            self.make_move(self.cur_stone, None, attr);
         }
         Ok(())
+    }
+
+    fn process_move_offer(board: &Board, v: &mut Vec<Point>, p: Point) -> Result<()> {
+        let int = board.get(p).ok_or(anyhow!("moving out of board: {}", p))?;
+        ensure!(
+            int.is_empty(),
+            "moving into an occupied intersection: {}",
+            p
+        );
+        for &it in v.iter() {
+            ensure!(it != p, "duplicate move offer: {}", p);
+            ensure!(
+                !board.is_symmetrical(it, p),
+                "symmetrical move offer: {} -> {}",
+                it,
+                p
+            );
+        }
+        // Save p as an offered move.
+        v.push(p);
+        Ok(())
+    }
+}
+
+/// The record of a game, updated by either `Event`s or `Msg`'s.
+pub struct Record<T> {
+    settings: Settings,
+    side: Option<Side>,
+    tx: Receiver<T>,
+    board: Board,
+    last_move_attr: MoveAttr,
+    last_choice_data: Option<(Side, ChoiceSet)>,
+    last_side: Side,
+    last_stone: Stone,
+}
+
+impl<T> Record<T> {
+    fn new(settings: Settings, side: Option<Side>, tx: Receiver<T>) -> Record<T> {
+        let size = settings.board_size;
+        Record {
+            settings,
+            side,
+            tx,
+            board: Board::new(size),
+            last_choice_data: None,
+            last_move_attr: MoveAttr::Normal,
+            last_side: Side::Second,
+            last_stone: Stone::White,
+        }
+    }
+
+    /// Returns the game settings.
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Returns a reference to the board.
+    pub fn board(&self) -> &Board {
+        &self.board
+    }
+
+    /// Returns the last choice data.
+    ///
+    /// # Panics
+    /// Panics if no choice has been requested.
+    pub fn last_choice_data(&self) -> (Side, &ChoiceSet) {
+        match self.last_choice_data {
+            Some((side, ref set)) => (side, set),
+            None => panic!("no choice requested"),
+        }
+    }
+
+    /// Returns the last move attribute.
+    pub fn last_move_attr(&self) -> MoveAttr {
+        self.last_move_attr
+    }
+
+    /// Returns the last side to move.
+    pub fn last_side(&self) -> Side {
+        self.last_side
+    }
+
+    /// Returns the last stone type to move.
+    pub fn last_stone(&self) -> Stone {
+        self.last_stone
+    }
+
+    /// Returns the stone of a side.
+    pub fn stone_by_side(&self, side: Side) -> Stone {
+        if self.last_side == side {
+            self.last_stone
+        } else {
+            self.last_stone.opposite()
+        }
+    }
+
+    /// Returns the side with a type of stone.
+    pub fn side_by_stone(&self, stone: Stone) -> Side {
+        if self.last_stone == stone {
+            self.last_side
+        } else {
+            self.last_side.opposite()
+        }
+    }
+
+    fn make_move(&mut self, p: Option<Point>, attr: MoveAttr) {
+        self.last_side = self.last_side.opposite();
+        self.last_stone = self.last_stone.opposite();
+        if let Some(p) = p {
+            self.board.make_move(p, self.last_stone);
+        }
+        self.last_move_attr = attr;
+    }
+
+    fn swap(&mut self) {
+        self.last_side = self.last_side.opposite();
+    }
+}
+
+impl Record<Msg> {
+    /// Updates the state with a `Msg` received and returns it.
+    pub fn update(&mut self) -> Result<Msg, RecvError> {
+        let msg = self.tx.recv()?;
+        match msg {
+            Msg::Move(p, attr) => self.make_move(p, attr),
+            Msg::ChoiceRequest(ref set) => {
+                self.last_choice_data = Some((self.side.unwrap(), set.clone()));
+            }
+            Msg::StoneSwap => self.swap(),
+            _ => (),
+        }
+        Ok(msg)
+    }
+}
+
+impl Record<Event> {
+    /// Updates the state with an `Event` received and returns it.
+    pub fn update(&mut self) -> Result<Event, RecvError> {
+        let event = self.tx.recv()?;
+        match event {
+            Event::Move(p, attr) => self.make_move(p, attr),
+            Event::ChoiceRequest(side, ref set) => {
+                self.last_choice_data = Some((side, set.clone()));
+            }
+            Event::StoneSwap => self.swap(),
+            _ => (),
+        }
+        Ok(event)
+    }
+}
+
+impl From<Receiver<Msg>> for Record<Msg> {
+    /// Wraps a `Receiver<Msg>` into a `State`.
+    fn from(tx: Receiver<Msg>) -> Record<Msg> {
+        if let Msg::GameStart(settings, side) = tx.recv().unwrap() {
+            Record::new(settings, Some(side), tx)
+        } else {
+            panic!("invalid receiver")
+        }
+    }
+}
+
+impl From<Receiver<Event>> for Record<Event> {
+    /// Wraps a `Receiver<Event>` into a `State`.
+    fn from(tx: Receiver<Event>) -> Record<Event> {
+        if let Event::GameStart(settings) = tx.recv().unwrap() {
+            Record::new(settings, None, tx)
+        } else {
+            panic!("invalid receiver")
+        }
     }
 }

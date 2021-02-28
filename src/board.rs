@@ -193,6 +193,12 @@ impl Board {
         }
     }
 
+    /// Tests whether a point is contained in the board.
+    pub fn contains_point(&self, p: Point) -> bool {
+        let size = self.size;
+        p.x < size && p.y < size
+    }
+
     /// Returns a reference to an intersection,
     /// or `None` if the given point is out of board.
     pub fn get(&self, p: Point) -> Option<&Intersection> {
@@ -227,6 +233,36 @@ impl Index<Point> for Board {
 impl IndexMut<Point> for Board {
     fn index_mut(&mut self, i: Point) -> &mut Self::Output {
         self.get_mut(i).expect("index out of bounds")
+    }
+}
+
+impl fmt::Display for Board {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let size = self.size;
+        if size > 26 {
+            return write!(f, "Board(size={})", size);
+        }
+        for y in (0..size).rev() {
+            if y < 9 {
+                write!(f, " ")?;
+            }
+            write!(f, "{}", y + 1)?;
+            for x in 0..size {
+                let int = self.ints[(y * size + x) as usize];
+                let char = match int.stone() {
+                    Some(Stone::Black) => 'X',
+                    Some(Stone::White) => '0',
+                    None => '-',
+                };
+                write!(f, " {}", char)?;
+            }
+            writeln!(f)?;
+        }
+        write!(f, "  ")?;
+        for x in 0..size {
+            write!(f, " {}", (b'A' + x as u8) as char)?;
+        }
+        Ok(())
     }
 }
 
@@ -351,7 +387,7 @@ impl BoardExt for Board {
         fn row_len(board: &Board, p: Point, stone: Stone, d: Direction) -> u32 {
             let mut res = 1;
 
-            for cur_d in [d, d.opposite()].iter().copied() {
+            for &cur_d in &[d, d.opposite()] {
                 let mut cur_p = p;
                 loop {
                     // Should panic here if out of board.
@@ -371,7 +407,7 @@ impl BoardExt for Board {
 
         if let Some(stone) = self[p].stone {
             let mut res = 1;
-            for d in [Right, UpRight, Up, UpLeft].iter().copied() {
+            for &d in &[Right, UpRight, Up, UpLeft] {
                 let len = row_len(self, p, stone, d);
                 if len > res {
                     res = len;
@@ -390,5 +426,19 @@ impl BoardExt for Board {
         let dx = (p.x as i32 - center).abs() as u32;
         let dy = (p.y as i32 - center).abs() as u32;
         dx.max(dy)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn point() {
+        assert_eq!(Point::new(0, 0), "A1".parse().unwrap());
+        assert_eq!(Point::new(26, 9), "aa10".parse().unwrap());
+        for x in 0..1000 {
+            let p = Point::new(x, 0);
+            assert_eq!(p, p.to_string().parse().unwrap());
+        }
     }
 }
