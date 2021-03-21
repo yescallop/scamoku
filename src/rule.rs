@@ -5,7 +5,7 @@ use crate::{board::*, game::*};
 use anyhow::*;
 
 /// An interface for a rule.
-pub trait Rule: Send + Sync + 'static {
+pub trait Rule: Sync {
     /// Returns the ID of the rule.
     fn id(&self) -> String;
 
@@ -16,7 +16,7 @@ pub trait Rule: Send + Sync + 'static {
     fn process_move(&self, ctrl: &mut Control, p: Point, index: u32) -> Result<()>;
 
     /// Processes a choice.
-    fn process_choice(&self, ctrl: &mut Control, choice: usize, side: Side);
+    fn process_choice(&self, ctrl: &mut Control, choice: usize);
 
     /// Initiates the game.
     fn init(&self, _ctrl: &mut Control) {}
@@ -53,7 +53,7 @@ impl Rule for Variant {
         Ok(())
     }
 
-    fn process_choice(&self, _: &mut Control, _: usize, _: Side) {}
+    fn process_choice(&self, _: &mut Control, _: usize) {}
 
     fn init(&self, ctrl: &mut Control) {
         ctrl.end_opening();
@@ -153,7 +153,7 @@ pub mod standard {
             Ok(())
         }
 
-        fn process_choice(&self, _: &mut Control, _: usize, _: Side) {}
+        fn process_choice(&self, _: &mut Control, _: usize) {}
     }
 
     pub struct LongPro;
@@ -180,7 +180,7 @@ pub mod standard {
             Ok(())
         }
 
-        fn process_choice(&self, _: &mut Control, _: usize, _: Side) {}
+        fn process_choice(&self, _: &mut Control, _: usize) {}
     }
 
     pub struct Swap;
@@ -196,17 +196,14 @@ pub mod standard {
 
         fn process_move(&self, ctrl: &mut Control, _: Point, index: u32) -> Result<()> {
             if index == 3 {
-                ctrl.request_choice(
-                    Side::Second,
-                    ChoiceSet::from_msgs(vec!["choose black", "choose white"]),
-                );
+                ctrl.request_choice(Side::Second, ChoiceSet::from_msgs(vec!["swap", "remain"]));
             } else {
                 ctrl.swap();
             }
             Ok(())
         }
 
-        fn process_choice(&self, ctrl: &mut Control, choice: usize, _: Side) {
+        fn process_choice(&self, ctrl: &mut Control, choice: usize) {
             if choice == 0 {
                 ctrl.swap()
             }
@@ -230,21 +227,18 @@ pub mod standard {
                 3 => ctrl.request_choice(
                     Side::Second,
                     ChoiceSet::from_msgs(vec![
-                        "choose black",
-                        "choose white",
-                        "make 2 moves and choose color by the opponent",
+                        "swap",
+                        "remain",
+                        "make 2 moves and choose by the opponent",
                     ]),
                 ),
-                5 => ctrl.request_choice(
-                    Side::First,
-                    ChoiceSet::from_msgs(vec!["choose black", "choose white"]),
-                ),
+                5 => ctrl.request_choice(Side::First, ChoiceSet::from_msgs(vec!["swap", "remain"])),
                 _ => ctrl.swap(),
             }
             Ok(())
         }
 
-        fn process_choice(&self, ctrl: &mut Control, choice: usize, _: Side) {
+        fn process_choice(&self, ctrl: &mut Control, choice: usize) {
             if choice == 0 {
                 ctrl.swap()
             }
@@ -266,14 +260,11 @@ pub mod standard {
         }
 
         fn process_move(&self, ctrl: &mut Control, _: Point, _: u32) -> Result<()> {
-            ctrl.request_choice(
-                Side::Second,
-                ChoiceSet::from_msgs(vec!["choose black", "choose white"]),
-            );
+            ctrl.request_choice(Side::Second, ChoiceSet::from_msgs(vec!["swap", "remain"]));
             Ok(())
         }
 
-        fn process_choice(&self, ctrl: &mut Control, choice: usize, _: Side) {
+        fn process_choice(&self, ctrl: &mut Control, choice: usize) {
             if choice == 0 {
                 ctrl.swap()
             }
@@ -298,10 +289,7 @@ pub mod standard {
             if index < 3 {
                 ctrl.swap();
             } else if index == 3 {
-                ctrl.request_choice(
-                    Side::Second,
-                    ChoiceSet::from_msgs(vec!["choose black", "choose white"]),
-                );
+                ctrl.request_choice(Side::Second, ChoiceSet::from_msgs(vec!["swap", "remain"]));
             } else {
                 // index == 4
                 ctrl.request_move_offer(2);
@@ -310,7 +298,7 @@ pub mod standard {
             Ok(())
         }
 
-        fn process_choice(&self, ctrl: &mut Control, choice: usize, _: Side) {
+        fn process_choice(&self, ctrl: &mut Control, choice: usize) {
             if choice == 0 {
                 ctrl.swap();
             }
@@ -334,10 +322,7 @@ pub mod standard {
                 ensure!(d <= 3, "the fourth move outside central 7x7 area");
             } else if index == 5 {
                 ensure!(d <= 4, "the fifth move outside central 9x9 area");
-                ctrl.request_choice(
-                    Side::First,
-                    ChoiceSet::from_msgs(vec!["choose black", "choose white"]),
-                );
+                ctrl.request_choice(Side::First, ChoiceSet::from_msgs(vec!["swap", "remain"]));
                 return Ok(());
             }
             if index != 3 {
@@ -346,7 +331,7 @@ pub mod standard {
             Ok(())
         }
 
-        fn process_choice(&self, ctrl: &mut Control, choice: usize, _: Side) {
+        fn process_choice(&self, ctrl: &mut Control, choice: usize) {
             if choice == 0 {
                 ctrl.swap();
             }
@@ -387,14 +372,11 @@ pub mod standard {
             Ok(())
         }
 
-        fn process_choice(&self, ctrl: &mut Control, choice: usize, _: Side) {
+        fn process_choice(&self, ctrl: &mut Control, choice: usize) {
             if ctrl.cur_choice_index() == 1 {
                 // Save the move count
                 ctrl.set_rule_data(choice);
-                ctrl.request_choice(
-                    Side::Second,
-                    ChoiceSet::from_msgs(vec!["choose black", "choose white"]),
-                );
+                ctrl.request_choice(Side::Second, ChoiceSet::from_msgs(vec!["swap", "remain"]));
             } else if choice == 0 {
                 ctrl.swap();
             }
@@ -421,7 +403,7 @@ pub mod standard {
             }
             ctrl.request_choice(
                 ctrl.cur_side().opposite(),
-                ChoiceSet::from_msgs(vec!["choose black", "choose white"]),
+                ChoiceSet::from_msgs(vec!["swap", "remain"]),
             );
             if index == 5 {
                 ctrl.end_opening();
@@ -429,26 +411,14 @@ pub mod standard {
             Ok(())
         }
 
-        fn process_choice(&self, ctrl: &mut Control, choice: usize, side: Side) {
-            if (choice == 0) != (ctrl.stone_by_side(side) == Stone::Black) {
+        fn process_choice(&self, ctrl: &mut Control, choice: usize) {
+            if choice == 0 {
                 ctrl.swap();
             }
         }
     }
 
-    pub struct Taraguchi(u32);
-
-    impl Taraguchi {
-        pub fn with_n(n: u32) -> Self {
-            assert!(n > 1);
-            Self(n)
-        }
-    }
-    impl Default for Taraguchi {
-        fn default() -> Self {
-            Self(5)
-        }
-    }
+    pub struct Taraguchi(pub u32);
 
     impl Rule for Taraguchi {
         fn id(&self) -> String {
@@ -466,8 +436,8 @@ pub mod standard {
                 ctrl.request_choice(
                     ctrl.cur_side().opposite(),
                     ChoiceSet::Message(vec![
-                        "choose black".into(),
-                        "choose white".into(),
+                        "swap".into(),
+                        "remain".into(),
                         format!("offer {} moves", self.0),
                     ]),
                 );
@@ -476,7 +446,7 @@ pub mod standard {
             }
             ctrl.request_choice(
                 ctrl.cur_side().opposite(),
-                ChoiceSet::from_msgs(vec!["choose black", "choose white"]),
+                ChoiceSet::from_msgs(vec!["swap", "remain"]),
             );
             if index == 5 {
                 ctrl.end_opening();
@@ -484,30 +454,21 @@ pub mod standard {
             Ok(())
         }
 
-        fn process_choice(&self, ctrl: &mut Control, choice: usize, side: Side) {
+        fn process_choice(&self, ctrl: &mut Control, choice: usize) {
             if ctrl.cur_choice_index() == 4 && choice == 2 {
                 ctrl.request_move_offer(self.0 as usize);
             }
-            if (choice == 0) != (ctrl.stone_by_side(side) == Stone::Black) {
+            if choice == 0 {
                 ctrl.swap();
             }
         }
-    }
 
-    pub struct Soosyrv(u32);
-
-    impl Soosyrv {
-        pub fn with_n(n: u32) -> Self {
-            assert!(n > 1);
-            Self(n)
+        fn init(&self, _: &mut Control) {
+            assert!(self.0 != 0);
         }
     }
 
-    impl Default for Soosyrv {
-        fn default() -> Self {
-            Self(4)
-        }
-    }
+    pub struct Soosyrv(pub u32);
 
     impl Rule for Soosyrv {
         fn id(&self) -> String {
@@ -523,11 +484,9 @@ pub mod standard {
             if index < 3 {
                 ctrl.swap();
             } else if index == 3 {
-                ctrl.request_choice(
-                    Side::Second,
-                    ChoiceSet::from_msgs(vec!["choose black", "choose white"]),
-                );
+                ctrl.request_choice(Side::Second, ChoiceSet::from_msgs(vec!["swap", "remain"]));
             } else {
+                // index == 4
                 ctrl.request_choice(
                     ctrl.cur_side(),
                     ChoiceSet::MoveCount {
@@ -538,17 +497,15 @@ pub mod standard {
             Ok(())
         }
 
-        fn process_choice(&self, ctrl: &mut Control, choice: usize, side: Side) {
+        fn process_choice(&self, ctrl: &mut Control, choice: usize) {
             let index = ctrl.cur_choice_index();
             if index == 2 {
                 // Save the move count
                 ctrl.set_rule_data(choice);
-                return ctrl.request_choice(
-                    Side::Second,
-                    ChoiceSet::from_msgs(vec!["choose black", "choose white"]),
-                );
+                return ctrl
+                    .request_choice(Side::Second, ChoiceSet::from_msgs(vec!["swap", "remain"]));
             }
-            if (choice == 0) != (ctrl.stone_by_side(side) == Stone::Black) {
+            if choice == 0 {
                 ctrl.swap();
             }
             if index == 3 {
@@ -556,6 +513,10 @@ pub mod standard {
                 ctrl.request_move_offer(count);
                 ctrl.end_opening();
             }
+        }
+
+        fn init(&self, _: &mut Control) {
+            assert!(self.0 != 0);
         }
     }
 }

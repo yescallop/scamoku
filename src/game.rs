@@ -1,14 +1,11 @@
 use crate::board::*;
 use crate::rule::*;
 
+use std::sync::mpsc::{channel, Receiver, RecvError, RecvTimeoutError, Sender};
 use std::{any::Any, thread};
 use std::{
     fmt,
     time::{Duration, Instant},
-};
-use std::{
-    mem::replace,
-    sync::mpsc::{channel, Receiver, RecvError, RecvTimeoutError, Sender},
 };
 
 use anyhow::*;
@@ -39,7 +36,7 @@ impl ChoiceSet {
         match self {
             ChoiceSet::Message(v) => i < v.len(),
             ChoiceSet::Move(v) => i < v.len(),
-            ChoiceSet::MoveCount { max_count } => i >= 2 && i <= *max_count,
+            ChoiceSet::MoveCount { max_count } => i >= 1 && i <= *max_count,
         }
     }
 }
@@ -59,14 +56,6 @@ impl Side {
         match self {
             Side::First => Side::Second,
             Side::Second => Side::First,
-        }
-    }
-
-    /// Returns the ordinal of the side, 0 for `First` and 1 for `Second`.
-    pub fn ord(self) -> usize {
-        match self {
-            Side::First => 0,
-            Side::Second => 1,
         }
     }
 }
@@ -218,12 +207,12 @@ pub enum Msg {
     MoveRequest(Option<usize>),
     /// Choice requested.
     ChoiceRequest(ChoiceSet),
-    /// Timer updated. A field is updated if it's `Some`.
-    TimerUpdate {
+    /// Clock updated. A field is updated if it's `Some`.
+    ClockUpdate {
         /// The deadline for next move / choice.
         deadline: Option<Instant>,
-        /// The remaining time on the timer.
-        remaining: Option<Duration>,
+        /// The remaining time on the clock (yours, opponent's).
+        remaining: Option<(Duration, Duration)>,
     },
     /// Move made.
     Move(Option<Point>, MoveAttr),
@@ -244,14 +233,12 @@ pub enum Event {
     MoveRequest(Option<usize>),
     /// Choice requested.
     ChoiceRequest(Side, ChoiceSet),
-    /// Timer updated. A field is updated if it's `Some`.
-    TimerUpdate {
-        /// The side of which the timer is updated.
-        side: Side,
+    /// Clock updated. A field is updated if it's `Some`.
+    ClockUpdate {
         /// The deadline for next move / choice.
         deadline: Option<Instant>,
-        /// The remaining time on the timer.
-        remaining: Option<Duration>,
+        /// The remaining time on the clock (first, second).
+        remaining: Option<(Duration, Duration)>,
     },
     /// Move made by a player.
     Move(Option<Point>, MoveAttr),
@@ -272,13 +259,15 @@ impl Event {
             Msg::GameStart(settings, _) => Event::GameStart(settings),
             Msg::MoveRequest(ord) => Event::MoveRequest(ord),
             Msg::ChoiceRequest(set) => Event::ChoiceRequest(side, set),
-            Msg::TimerUpdate {
+            Msg::ClockUpdate {
                 deadline,
                 remaining,
-            } => Event::TimerUpdate {
-                side,
+            } => Event::ClockUpdate {
                 deadline,
-                remaining,
+                remaining: remaining.map(|t| match side {
+                    Side::First => t,
+                    Side::Second => (t.1, t.0),
+                }),
             },
             Msg::Move(p, attr) => Event::Move(p, attr),
             Msg::StoneSwap => Event::StoneSwap,
@@ -317,6 +306,7 @@ pub struct Builder {
     board_size: u32,
     move_timeout: Option<Duration>,
     game_timeout: Option<Duration>,
+    time_added_for_each_move: Option<Duration>,
     strict: bool,
 }
 
@@ -328,6 +318,7 @@ impl Builder {
             board_size: 15,
             move_timeout: None,
             game_timeout: None,
+            time_added_for_each_move: None,
             strict: false,
         }
     }
@@ -342,7 +333,7 @@ impl Builder {
         self
     }
 
-    /// Sets the timeout for moves.
+    /// Sets the timeout for each move.
     pub fn move_timeout(mut self, timeout: Duration) -> Self {
         self.move_timeout = Some(timeout);
         self
@@ -351,6 +342,12 @@ impl Builder {
     /// Sets the timeout for the game.
     pub fn game_timeout(mut self, timeout: Duration) -> Self {
         self.game_timeout = Some(timeout);
+        self
+    }
+
+    /// Sets the time added for each move.
+    pub fn time_added_for_each_move(mut self, time: Duration) -> Self {
+        self.time_added_for_each_move = Some(time);
         self
     }
 
@@ -439,13 +436,101 @@ pub struct Handle {
 
 enum State {
     PendingMove,
-    /// Processing a choice.
-    ///
-    /// This state allows more choices to be successively
-    /// requested after `end_opening` is called.
-    ProcessingChoice,
     PendingMoveOffer(Vec<Point>),
     PendingChoice(Side, ChoiceSet),
+}
+
+/// The clock of game.
+///
+/// TODO: To find a standardized rule of timing.
+struct Clock {
+    /// The timeout for each move.
+    move_timeout: Option<Duration>,
+
+    /// The timeout for the game.
+    game_timeout: Option<Duration>,
+    /// The time added for each move.
+    time_added_for_each_move: Option<Duration>,
+    /// The game timer, or `None` if there is no timeout for the game.
+    game_timer: Option<(Duration, Duration)>,
+
+    /// The start and deadline time of a request, or `None` if there is no timeout.
+    start_deadline: Option<(Instant, Instant)>,
+}
+
+impl Clock {
+    fn new(
+        move_timeout: Option<Duration>,
+        game_timeout: Option<Duration>,
+        time_added_for_each_move: Option<Duration>,
+    ) -> Self {
+        Self {
+            move_timeout,
+            game_timeout,
+            time_added_for_each_move,
+            game_timer: game_timeout.map(|d| (d, d)),
+            start_deadline: None,
+        }
+    }
+
+    fn game_timer_for(&mut self, side: Side) -> Option<&mut Duration> {
+        self.game_timer.as_mut().map(|t| match side {
+            Side::First => &mut t.0,
+            Side::Second => &mut t.1,
+        })
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.start_deadline.map(|x| x.1)
+    }
+
+    /// Calculates the timeout for a side.
+    ///
+    /// Returns a tuple of the optional timeout with a boolean
+    /// indicating whether the deadline is reused.
+    fn calc_timeout(&mut self, side: Side) -> (Option<Duration>, bool) {
+        let now = Instant::now();
+        match self.start_deadline {
+            // Move or choice is being requested. Reuse the deadline.
+            Some((_, deadline)) => (Some(deadline - now), true),
+            None => {
+                let game_timeout = self.game_timer_for(side).copied();
+                // Take the minimum timeout.
+                let timeout = match (game_timeout, self.move_timeout) {
+                    (None, None) => None,
+                    (Some(t), None) | (None, Some(t)) => Some(t),
+                    (Some(t1), Some(t2)) => Some(t1.min(t2)),
+                };
+                let timeout = if let Some(timeout) = timeout {
+                    let deadline = now + timeout;
+                    self.start_deadline = Some((now, deadline));
+                    Some(timeout)
+                } else {
+                    None
+                };
+                (timeout, false)
+            }
+        }
+    }
+
+    /// Stops the clock of a side.
+    fn stop_clock(&mut self, side: Side, is_move: bool) {
+        if is_move {
+            if let (Some(t), Some(add)) = (self.game_timer.as_mut(), self.time_added_for_each_move)
+            {
+                t.0 += add;
+                t.1 += add;
+            }
+        }
+
+        if let Some((start, _)) = self.start_deadline.take() {
+            let elapsed = start.elapsed();
+            if let Some(t) = self.game_timer_for(side) {
+                let remaining = t.checked_sub(elapsed).unwrap_or_default();
+                *t = remaining;
+            }
+        }
+    }
 }
 
 /// Provides control over a game.
@@ -476,15 +561,8 @@ pub struct Control {
     /// The current stone of the game.
     cur_stone: Stone,
 
-    /// The timeout for moves.
-    move_timeout: Option<Duration>,
-    /// The timeout for the game.
-    game_timeout: Option<Duration>,
-    /// The game timer, or `None` if there is no timeout for the game.
-    game_timer: Option<[Duration; 2]>,
-
-    /// The start and deadline time of a request, or `None` if there is no timeout.
-    start_deadline: Option<(Instant, Instant)>,
+    /// The clock.
+    clock: Clock,
 
     /// The current choice index, or `0` if no choice has ever been requested.
     cur_choice_index: u32,
@@ -510,6 +588,11 @@ impl Control {
     ) -> Control {
         let size = builder.board_size;
         let board = Board::new(size);
+        let clock = Clock::new(
+            builder.move_timeout,
+            builder.game_timeout,
+            builder.time_added_for_each_move,
+        );
         Control {
             msg_txs,
             msg_rx,
@@ -522,10 +605,7 @@ impl Control {
             strict: builder.strict,
             cur_side: Side::First,
             cur_stone: Stone::Black,
-            move_timeout: builder.move_timeout,
-            game_timeout: builder.game_timeout,
-            game_timer: builder.game_timeout.map(|d| [d, d]),
-            start_deadline: None,
+            clock,
             cur_choice_index: 0,
             state: State::PendingMove,
             last_move_kind: Some(MoveAttr::Normal),
@@ -609,13 +689,18 @@ impl Control {
         self.msg_both(Msg::StoneSwap);
         self.event(Event::StoneSwap);
     }
+
     /// Requests a move offer of the given `count`.
+    ///
+    /// This will do nothing if `count` is `1`.
     ///
     /// # Panics
     /// Panics if the game is not in the opening, the `count` is zero, or a move offer has already been requested.
     pub fn request_move_offer(&mut self, count: usize) {
         assert!(self.in_opening && count != 0);
-        self.state = State::PendingMoveOffer(Vec::with_capacity(count));
+        if count != 1 {
+            self.state = State::PendingMoveOffer(Vec::with_capacity(count));
+        }
     }
 
     /// Requests a choice.
@@ -623,13 +708,13 @@ impl Control {
     /// # Panics
     /// Panics if the game is not in the opening or a choice has already been requested,
     pub fn request_choice(&mut self, side: Side, choice_set: ChoiceSet) {
-        assert!(
-            self.in_opening
-                || matches!(
-                    self.state,
-                    State::ProcessingChoice | State::PendingMoveOffer(_)
-                )
-        );
+        assert!(self.in_opening);
+        self._request_choice(side, choice_set);
+    }
+
+    /// Internal function for requesting a choice without checking the opening status.
+    #[inline]
+    fn _request_choice(&mut self, side: Side, choice_set: ChoiceSet) {
         self.state = State::PendingChoice(side, choice_set);
         self.cur_choice_index += 1;
     }
@@ -713,8 +798,8 @@ impl Control {
             rule_id: self.rule.id(),
             variant: self.rule.variant(),
             board_size: self.board.size(),
-            move_timeout: self.move_timeout,
-            game_timeout: self.game_timeout,
+            move_timeout: self.clock.move_timeout,
+            game_timeout: self.clock.game_timeout,
             strict: self.strict,
         };
         self.msg(Side::First, Msg::GameStart(settings.clone(), Side::First));
@@ -738,41 +823,28 @@ impl Control {
                 _ => self.cur_side,
             };
 
-            let now = Instant::now();
-            // Calculate the timeout.
-            let timeout = match self.start_deadline {
-                // Move or choice is being requested. Reuse the deadline.
-                Some((_, deadline)) => Some(deadline - now),
-                None => {
-                    // Update the deadline and make a new request.
-                    let game_timeout = self.game_timer.map(|t| t[side.ord()]);
-                    // Take the minimum.
-                    let timeout = match (game_timeout, self.move_timeout) {
-                        (None, None) => None,
-                        (Some(t), None) | (None, Some(t)) => Some(t),
-                        (Some(t1), Some(t2)) => Some(t1.min(t2)),
-                    };
-                    if let Some(timeout) = timeout {
-                        let deadline = now + timeout;
-                        self.start_deadline = Some((now, deadline));
-                        // Broadcast the updated deadline.
-                        self.msg(
-                            side,
-                            Msg::TimerUpdate {
-                                deadline: Some(deadline),
-                                remaining: None,
-                            },
-                        );
-                        self.event(Event::TimerUpdate {
-                            side,
-                            deadline: Some(deadline),
+            // If the deadline is reused, do nothing.
+            // If the deadline is updated, broadcast it.
+            // And then make a request if the deadline is not reused.
+            let (timeout, reused) = self.clock.calc_timeout(Side::First);
+
+            if !reused {
+                if timeout.is_some() {
+                    let deadline = self.clock.deadline();
+                    self.msg(
+                        side,
+                        Msg::ClockUpdate {
+                            deadline,
                             remaining: None,
-                        });
-                    }
-                    self.make_request();
-                    timeout
+                        },
+                    );
+                    self.event(Event::ClockUpdate {
+                        deadline,
+                        remaining: None,
+                    });
                 }
-            };
+                self.make_request();
+            }
 
             let res = if let Some(t) = timeout {
                 self.msg_rx.recv_timeout(t)
@@ -829,29 +901,21 @@ impl Control {
         }
     }
 
-    /// Stops the timer of a side.
-    fn stop_timer(&mut self, side: Side) {
-        if let Some((start, _)) = self.start_deadline.take() {
-            let elapsed = start.elapsed();
-            let ord = side.ord();
-            if let Some(t) = &mut self.game_timer.map(|t| t[ord]) {
-                let remaining = t.checked_sub(elapsed).unwrap_or_default();
-                *t = remaining;
-
-                // Broadcast the updated timer.
-                self.msg(
-                    side,
-                    Msg::TimerUpdate {
-                        deadline: None,
-                        remaining: Some(remaining),
-                    },
-                );
-                self.event(Event::TimerUpdate {
-                    side,
-                    deadline: None,
-                    remaining: Some(remaining),
-                });
-            }
+    /// Stops the clock of a side.
+    fn stop_clock(&mut self, side: Side, is_move: bool) {
+        self.clock.stop_clock(side, is_move);
+        if let Some(t) = self.clock.game_timer {
+            self.msg_both(Msg::ClockUpdate {
+                deadline: None,
+                remaining: Some(match side {
+                    Side::First => t,
+                    Side::Second => (t.1, t.0),
+                }),
+            });
+            self.event(Event::ClockUpdate {
+                deadline: None,
+                remaining: Some(t),
+            });
         }
     }
 
@@ -871,8 +935,8 @@ impl Control {
                         }
                     }
 
-                    self.stop_timer(side);
-                    self.request_choice(side.opposite(), ChoiceSet::Move(offered));
+                    self.stop_clock(side, false);
+                    self._request_choice(side.opposite(), ChoiceSet::Move(offered));
                 } else {
                     bail!("no move offer requested");
                 }
@@ -893,7 +957,7 @@ impl Control {
                 ensure!(self.result.is_some(), "win claim was unsuccessful: {}", p);
             }
             PlayerMsg::Choice(choice) => {
-                let choice_set = if let State::PendingChoice(s, ref set) = self.state {
+                let set = if let State::PendingChoice(s, ref set) = self.state {
                     ensure!(s == side, "not your turn to make a choice");
                     set
                 } else {
@@ -901,28 +965,29 @@ impl Control {
                 };
 
                 ensure!(
-                    choice_set.contains_index(choice),
+                    set.contains_index(choice),
                     "invalid choice: {} for {:?}",
                     choice,
-                    choice_set
+                    set
                 );
 
-                self.stop_timer(side);
                 self.event(Event::Choice(choice));
 
-                if let State::PendingChoice(side, ref set) =
-                    replace(&mut self.state, State::ProcessingChoice)
-                {
-                    if let ChoiceSet::Move(v) = set {
-                        let p = v[choice];
-                        self.make_move(self.stone_by_side(side), Some(p), MoveAttr::Normal);
-                    } else {
-                        self.rule.process_choice(self, choice, side);
-                    }
-                }
+                if let ChoiceSet::Move(v) = set {
+                    let p = v[choice];
+                    self.make_move(
+                        // The move is to be made by the opponent.
+                        self.stone_by_side(side.opposite()),
+                        Some(p),
+                        MoveAttr::Normal,
+                    );
 
-                if matches!(self.state, State::ProcessingChoice) {
+                    self.stop_clock(side, true);
                     self.state = State::PendingMove;
+                } else {
+                    self.stop_clock(side, false);
+                    self.state = State::PendingMove;
+                    self.rule.process_choice(self, choice);
                 }
             }
             PlayerMsg::AcceptDrawOffer => {
@@ -954,8 +1019,8 @@ impl Control {
             if v.len() == v.capacity() {
                 // Finished
                 let v = v.clone();
-                self.stop_timer(side);
-                self.request_choice(side.opposite(), ChoiceSet::Move(v));
+                self.stop_clock(side, false);
+                self._request_choice(side.opposite(), ChoiceSet::Move(v));
             }
             return Ok(());
         }
@@ -988,7 +1053,7 @@ impl Control {
                     .process_move(self, p, self.board.cur_move_index() + 1)?;
             }
 
-            self.stop_timer(side);
+            self.stop_clock(side, true);
             self.make_move(stone, Some(p), attr);
 
             if !in_opening && self.strict {
@@ -1001,7 +1066,7 @@ impl Control {
             }
             self.last_move_kind = None;
 
-            self.stop_timer(side);
+            self.stop_clock(side, true);
             self.make_move(self.cur_stone, None, attr);
         }
         Ok(())
@@ -1029,8 +1094,47 @@ impl Control {
     }
 }
 
+pub trait Recordable: Sized + Clone {
+    fn record(&self, rec: &mut Record<Self>);
+    fn is_error(&self) -> bool;
+}
+
+impl Recordable for Msg {
+    fn record(&self, rec: &mut Record<Self>) {
+        match *self {
+            Msg::Move(p, attr) => rec.make_move(p, attr),
+            Msg::ChoiceRequest(ref set) => {
+                rec.last_choice_data = Some((rec.side.unwrap(), set.clone()));
+            }
+            Msg::StoneSwap => rec.swap(),
+            _ => (),
+        }
+    }
+
+    fn is_error(&self) -> bool {
+        matches!(self, Msg::Error(_))
+    }
+}
+
+impl Recordable for Event {
+    fn record(&self, rec: &mut Record<Self>) {
+        match *self {
+            Event::Move(p, attr) => rec.make_move(p, attr),
+            Event::ChoiceRequest(side, ref set) => {
+                rec.last_choice_data = Some((side, set.clone()));
+            }
+            Event::StoneSwap => rec.swap(),
+            _ => (),
+        }
+    }
+
+    fn is_error(&self) -> bool {
+        matches!(self, Event::Error(..))
+    }
+}
+
 /// The record of a game, updated by either `Event`s or `Msg`'s.
-pub struct Record<T> {
+pub struct Record<T: Recordable> {
     settings: Settings,
     side: Option<Side>,
     tx: Receiver<T>,
@@ -1039,9 +1143,10 @@ pub struct Record<T> {
     last_choice_data: Option<(Side, ChoiceSet)>,
     last_side: Side,
     last_stone: Stone,
+    last_non_error: Option<T>,
 }
 
-impl<T> Record<T> {
+impl<T: Recordable> Record<T> {
     fn new(settings: Settings, side: Option<Side>, tx: Receiver<T>) -> Record<T> {
         let size = settings.board_size;
         Record {
@@ -1053,7 +1158,17 @@ impl<T> Record<T> {
             last_move_attr: MoveAttr::Normal,
             last_side: Side::Second,
             last_stone: Stone::White,
+            last_non_error: None,
         }
+    }
+
+    pub fn update(&mut self) -> Result<T, RecvError> {
+        let item = self.tx.recv()?;
+        item.record(self);
+        if !item.is_error() {
+            self.last_non_error = Some(item.clone());
+        }
+        Ok(item)
     }
 
     /// Returns the game settings.
@@ -1092,6 +1207,10 @@ impl<T> Record<T> {
         self.last_stone
     }
 
+    pub fn last_non_error(&self) -> Option<&T> {
+        self.last_non_error.as_ref()
+    }
+
     /// Returns the stone of a side.
     pub fn stone_by_side(&self, side: Side) -> Stone {
         if self.last_side == side {
@@ -1121,38 +1240,6 @@ impl<T> Record<T> {
 
     fn swap(&mut self) {
         self.last_side = self.last_side.opposite();
-    }
-}
-
-impl Record<Msg> {
-    /// Updates the state with a `Msg` received and returns it.
-    pub fn update(&mut self) -> Result<Msg, RecvError> {
-        let msg = self.tx.recv()?;
-        match msg {
-            Msg::Move(p, attr) => self.make_move(p, attr),
-            Msg::ChoiceRequest(ref set) => {
-                self.last_choice_data = Some((self.side.unwrap(), set.clone()));
-            }
-            Msg::StoneSwap => self.swap(),
-            _ => (),
-        }
-        Ok(msg)
-    }
-}
-
-impl Record<Event> {
-    /// Updates the state with an `Event` received and returns it.
-    pub fn update(&mut self) -> Result<Event, RecvError> {
-        let event = self.tx.recv()?;
-        match event {
-            Event::Move(p, attr) => self.make_move(p, attr),
-            Event::ChoiceRequest(side, ref set) => {
-                self.last_choice_data = Some((side, set.clone()));
-            }
-            Event::StoneSwap => self.swap(),
-            _ => (),
-        }
-        Ok(event)
     }
 }
 

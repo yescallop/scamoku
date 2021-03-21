@@ -1,6 +1,7 @@
 use std::{
     io::{self, Write},
     str::FromStr,
+    time::Duration,
 };
 
 use scamoku::{board::Point, game::*, rule};
@@ -24,11 +25,21 @@ pub fn run() {
         msg_tx,
         event_rx,
         join_handle: _,
-    } = Builder::with_rule(rule).strict().start_raw();
+    } = Builder::with_rule(rule)
+        .strict()
+        .game_timeout(Duration::from_secs(3600))
+        .time_added_for_each_move(Duration::from_secs(10))
+        .start_raw();
 
     let mut record = Record::from(event_rx);
     while let Ok(event) = record.update() {
-        process_event(&record, &msg_tx, event);
+        let mut event = &event;
+        if let Event::Error(side, msg) = event {
+            eprintln!("[Error] [{}] {}", side, msg);
+            // Reprocess the last non-error event.
+            event = record.last_non_error().expect("error at startup");
+        }
+        process_event(&record, &msg_tx, &event);
     }
 }
 
@@ -51,11 +62,11 @@ fn ask<T: FromStr>(msg: &str, predicate: impl Fn(&T) -> bool) -> T {
 }
 
 /// Processes an event.
-fn process_event(record: &Record<Event>, msg_tx: &PlayerMsgSender, event: Event) {
+fn process_event(record: &Record<Event>, msg_tx: &PlayerMsgSender, event: &Event) {
     let last_side = record.last_side();
     let last_stone = record.last_stone();
-    match event {
-        Event::GameStart(s) => {
+    match *event {
+        Event::GameStart(ref s) => {
             println!("----- GAME SETTINGS -----");
             println!("Rule ID: {}", s.rule_id);
             println!("Variant: {}", s.variant);
@@ -80,12 +91,14 @@ fn process_event(record: &Record<Event>, msg_tx: &PlayerMsgSender, event: Event)
             };
 
             let m: Move = ask(&msg, |m| match *m {
-                Move::Normal(p) | Move::DrawOffer(p) | Move::WinClaim(p) => {
-                    record.board().contains_point(p)
+                Move::Normal(p) | Move::DrawOffer(p) => {
+                    record.board().get(p).map_or(false, |i| i.is_empty())
                 }
+                Move::WinClaim(p) => record.board().contains_point(p),
                 Move::Offers(ref v) => {
                     let board = record.board();
-                    v.iter().all(|&p| board.contains_point(p))
+                    v.iter()
+                        .all(|&p| board.get(p).map_or(false, |i| i.is_empty()))
                 }
                 Move::PassOrAcceptDrawOffer => true,
             });
@@ -103,9 +116,9 @@ fn process_event(record: &Record<Event>, msg_tx: &PlayerMsgSender, event: Event)
                 Move::WinClaim(p) => msg_tx.claim_win(p),
             }
         }
-        Event::ChoiceRequest(side, choice_set) => {
+        Event::ChoiceRequest(side, ref choice_set) => {
             println!("----- CHOICE REQUEST -----");
-            match &choice_set {
+            match choice_set {
                 ChoiceSet::Message(v) => {
                     println!("Make a choice from below:");
                     for (i, msg) in v.into_iter().enumerate() {
@@ -135,7 +148,10 @@ fn process_event(record: &Record<Event>, msg_tx: &PlayerMsgSender, event: Event)
 
             msg_tx.make_choice(choice);
         }
-        Event::TimerUpdate { .. } => todo!(),
+        Event::ClockUpdate {
+            deadline,
+            remaining,
+        } => println!("deadline: {:?}, remaining: {:?}", deadline, remaining),
         Event::Move(p, attr) => {
             if let Some(p) = p {
                 if attr == MoveAttr::DrawOffer {
@@ -170,9 +186,7 @@ fn process_event(record: &Record<Event>, msg_tx: &PlayerMsgSender, event: Event)
             }
             println!("Reason: {}", res.kind);
         }
-        Event::Error(side, msg) => {
-            eprintln!("[Error] [{}] {}", side, msg);
-        }
+        Event::Error(..) => (),
     }
 }
 
