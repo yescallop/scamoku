@@ -151,7 +151,11 @@ impl PlayerMsgSender {
     }
 
     /// Offers a set of moves.
+    ///
+    /// # Panics
+    /// Panics if the count of moves is less than 2.
     pub fn offer_moves(&self, v: Vec<Point>) {
+        assert!(v.len() > 1, "move count less than 2");
         self.send(PlayerMsg::OfferedMoves(v))
     }
 
@@ -290,6 +294,8 @@ pub struct Settings {
     pub move_timeout: Option<Duration>,
     /// The timeout for the game.
     pub game_timeout: Option<Duration>,
+    /// The time added for each move.
+    pub time_added_for_each_move: Option<Duration>,
     /// Whether the game is strict.
     ///
     /// If a game is strict, it will end as soon as a win can be achieved.
@@ -357,7 +363,7 @@ impl Builder {
         self
     }
 
-    /// Starts the game, returning a handle with message sender.
+    /// Starts the game and returns a handle split between players.
     pub fn start(self) -> Handle {
         let (p_msg_tx, msg_rx) = channel();
         let p_msg_txs = (
@@ -392,7 +398,7 @@ impl Builder {
         }
     }
 
-    /// Starts the game, returning a raw handle.
+    /// Starts the game and returns a raw handle.
     pub fn start_raw(self) -> RawHandle {
         let (msg_tx, msg_rx) = channel();
 
@@ -626,7 +632,7 @@ impl Control {
     /// Returns the rule data.
     ///
     /// # Panics
-    /// Panics if the rule data is uninitialized or data type mismatches.
+    /// Panics if the rule data is uninitialized or data types mismatch.
     pub fn rule_data<T: Any>(&mut self) -> &mut T {
         self.rule_data.downcast_mut().expect("data type mismatch")
     }
@@ -800,6 +806,7 @@ impl Control {
             board_size: self.board.size(),
             move_timeout: self.clock.move_timeout,
             game_timeout: self.clock.game_timeout,
+            time_added_for_each_move: self.clock.time_added_for_each_move,
             strict: self.strict,
         };
         self.msg(Side::First, Msg::GameStart(settings.clone(), Side::First));
@@ -1094,8 +1101,11 @@ impl Control {
     }
 }
 
+/// An update of game that can be recorded on a `Record`.
 pub trait Recordable: Sized + Clone {
+    /// Records on a `Record`.
     fn record(&self, rec: &mut Record<Self>);
+    /// Returns `true` if the update represents an error.
     fn is_error(&self) -> bool;
 }
 
@@ -1162,6 +1172,7 @@ impl<T: Recordable> Record<T> {
         }
     }
 
+    /// Updates the record and returns the update.
     pub fn update(&mut self) -> Result<T, RecvError> {
         let item = self.tx.recv()?;
         item.record(self);
@@ -1207,6 +1218,7 @@ impl<T: Recordable> Record<T> {
         self.last_stone
     }
 
+    /// Returns the last non-error update.
     pub fn last_non_error(&self) -> Option<&T> {
         self.last_non_error.as_ref()
     }
