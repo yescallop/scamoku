@@ -213,6 +213,137 @@ impl Board {
             None => None,
         }
     }
+
+    /// Makes a move on the board.
+    ///
+    /// # Panics
+    /// Panics when moving out of board or into an occupied intersection.
+    pub fn make_move(&mut self, p: Point, stone: Stone) {
+        let index = self.cur_move_index + 1;
+        self.cur_move_index = index;
+
+        let int = self.get_mut(p).expect("moving out of board");
+        assert!(int.is_empty(), "moving into an occupied intersection");
+        int.stone = Some(stone);
+        int.move_index = index;
+    }
+
+    /// Tests if two points are symmetrical on the board.
+    ///
+    /// # Panics
+    /// Panics if any of the points is out of board.
+    pub fn is_symmetrical(&self, p1: Point, p2: Point) -> bool {
+        let size = self.size();
+        let (x1, y1, x2, y2) = (p1.x, p1.y, p2.x, p2.y);
+        assert!(
+            x1 < size && y1 < size && x2 < size && y2 < size,
+            "out of board"
+        );
+
+        if x1 == x2 {
+            y1 + y2 + 1 == size
+        } else if x1 + x2 + 1 == size {
+            y1 == y2 || y1 + y2 + 1 == size
+        } else {
+            false
+        }
+    }
+
+    /// Returns the adjacent point on the given direction of a point.
+    ///
+    /// `None` is returned when reaching out of board.
+    ///
+    /// # Panics
+    /// Panics if the point is out of board.
+    pub fn adjacent(&self, p: Point, d: Direction) -> Option<Point> {
+        let (x, y) = (p.x, p.y);
+        let size = self.size();
+        assert!(x < size && y < size, "out of board");
+
+        let res = match d {
+            Up => (Some(x), Some(y + 1)),
+            UpRight => (Some(x + 1), Some(y + 1)),
+            Right => (Some(x + 1), Some(y)),
+            DownRight => (Some(x + 1), y.checked_sub(1)),
+            Down => (Some(x), y.checked_sub(1)),
+            DownLeft => (x.checked_sub(1), y.checked_sub(1)),
+            Left => (x.checked_sub(1), Some(y)),
+            UpLeft => (x.checked_sub(1), Some(y + 1)),
+        };
+        let size = self.size();
+        match res {
+            (Some(x), Some(y)) if x < size && y < size => Some(Point { x, y }),
+            _ => None,
+        }
+    }
+
+    /// Calculates the row length on the given direction at a point.
+    fn row_len(&self, p: Point, stone: Stone, d: Direction) -> u32 {
+        let mut res = 1;
+
+        for &cur_d in &[d, d.opposite()] {
+            let mut cur_p = p;
+            loop {
+                // Should panic here if out of board.
+                cur_p = match self.adjacent(cur_p, cur_d) {
+                    Some(p) => p,
+                    None => break,
+                };
+                if self[cur_p].stone == Some(stone) {
+                    res += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        res
+    }
+
+    /// Returns an iterator over the lengths of rows at a point, or `None` if empty.
+    ///
+    /// # Panics
+    /// Panics if the point is out of board.
+    pub fn row_len_iter(&self, p: Point) -> Option<RowLenIter<'_>> {
+        self[p].stone.map(|stone| RowLenIter {
+            board: self,
+            p,
+            stone,
+            i: 0,
+        })
+    }
+
+    /// Returns the [Chebyshev distance][1] from a point to the board center.
+    ///
+    /// [1]: https://en.wikipedia.org/wiki/Chebyshev_distance
+    ///
+    /// # Panics
+    /// Panics if the point is out of board.
+    pub fn chebyshev_dist_to_center(&self, p: Point) -> u32 {
+        let size = self.size();
+        assert!(p.x < size && p.y < size, "out of board");
+        let center = ((size - 1) / 2) as i32;
+        let dx = (p.x as i32 - center).abs() as u32;
+        let dy = (p.y as i32 - center).abs() as u32;
+        dx.max(dy)
+    }
+}
+
+/// An iterator over the lengths of rows at a point.
+pub struct RowLenIter<'a> {
+    board: &'a Board,
+    p: Point,
+    stone: Stone,
+    i: usize,
+}
+
+impl<'a> Iterator for RowLenIter<'a> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        let d = *[Right, UpRight, Up, UpLeft].get(self.i)?;
+        self.i += 1;
+        Some(self.board.row_len(self.p, self.stone, d))
+    }
 }
 
 impl Default for Board {
@@ -292,140 +423,6 @@ impl Direction {
             Left => Right,
             UpLeft => DownRight,
         }
-    }
-}
-
-/// The extensions for a board.
-pub trait BoardExt {
-    /// Makes a move on the board.
-    ///
-    /// # Panics
-    /// Panics when moving out of board or into an occupied intersection.
-    fn make_move(&mut self, p: Point, stone: Stone);
-
-    /// Tests if two points are symmetrical on the board.
-    ///
-    /// # Panics
-    /// Panics if any of the points is out of board.
-    fn is_symmetrical(&self, p1: Point, p2: Point) -> bool;
-
-    /// Returns the adjacent point on the given direction of a point.
-    ///
-    /// `None` is returned when reaching out of board.
-    ///
-    /// # Panics
-    /// Panics if the point is out of board.
-    fn adjacent(&self, p: Point, d: Direction) -> Option<Point>;
-
-    /// Returns the length of the longest row at a point, or `0` if empty.
-    ///
-    /// # Panics
-    /// Panics if the point is out of board.
-    fn longest_row_len(&self, p: Point) -> u32;
-
-    /// Returns the [Chebyshev distance][1] from a point to the board center.
-    ///
-    /// [1]: https://en.wikipedia.org/wiki/Chebyshev_distance
-    ///
-    /// # Panics
-    /// Panics if the point is out of board.
-    fn chebyshev_dist_to_center(&self, p: Point) -> u32;
-}
-
-impl BoardExt for Board {
-    fn make_move(&mut self, p: Point, stone: Stone) {
-        let index = self.cur_move_index + 1;
-        self.cur_move_index = index;
-
-        let int = self.get_mut(p).expect("moving out of board");
-        assert!(int.is_empty(), "moving into an occupied intersection");
-        int.stone = Some(stone);
-        int.move_index = index;
-    }
-
-    fn is_symmetrical(&self, p1: Point, p2: Point) -> bool {
-        let size = self.size();
-        let (x1, y1, x2, y2) = (p1.x, p1.y, p2.x, p2.y);
-        assert!(
-            x1 < size && y1 < size && x2 < size && y2 < size,
-            "out of board"
-        );
-
-        if x1 == x2 {
-            y1 + y2 + 1 == size
-        } else if x1 + x2 + 1 == size {
-            y1 == y2 || y1 + y2 + 1 == size
-        } else {
-            false
-        }
-    }
-
-    fn adjacent(&self, p: Point, d: Direction) -> Option<Point> {
-        let (x, y) = (p.x, p.y);
-        let size = self.size();
-        assert!(x < size && y < size, "out of board");
-
-        let res = match d {
-            Up => (Some(x), Some(y + 1)),
-            UpRight => (Some(x + 1), Some(y + 1)),
-            Right => (Some(x + 1), Some(y)),
-            DownRight => (Some(x + 1), y.checked_sub(1)),
-            Down => (Some(x), y.checked_sub(1)),
-            DownLeft => (x.checked_sub(1), y.checked_sub(1)),
-            Left => (x.checked_sub(1), Some(y)),
-            UpLeft => (x.checked_sub(1), Some(y + 1)),
-        };
-        let size = self.size();
-        match res {
-            (Some(x), Some(y)) if x < size && y < size => Some(Point { x, y }),
-            _ => None,
-        }
-    }
-
-    fn longest_row_len(&self, p: Point) -> u32 {
-        /// Calculates the row length on the given direction at a point.
-        fn row_len(board: &Board, p: Point, stone: Stone, d: Direction) -> u32 {
-            let mut res = 1;
-
-            for &cur_d in &[d, d.opposite()] {
-                let mut cur_p = p;
-                loop {
-                    // Should panic here if out of board.
-                    cur_p = match board.adjacent(cur_p, cur_d) {
-                        Some(p) => p,
-                        None => break,
-                    };
-                    if board[cur_p].stone == Some(stone) {
-                        res += 1;
-                    } else {
-                        break;
-                    }
-                }
-            }
-            res
-        }
-
-        if let Some(stone) = self[p].stone {
-            let mut res = 1;
-            for &d in &[Right, UpRight, Up, UpLeft] {
-                let len = row_len(self, p, stone, d);
-                if len > res {
-                    res = len;
-                }
-            }
-            res
-        } else {
-            0
-        }
-    }
-
-    fn chebyshev_dist_to_center(&self, p: Point) -> u32 {
-        let size = self.size();
-        assert!(p.x < size && p.y < size, "out of board");
-        let center = ((size - 1) / 2) as i32;
-        let dx = (p.x as i32 - center).abs() as u32;
-        let dy = (p.y as i32 - center).abs() as u32;
-        dx.max(dy)
     }
 }
 
