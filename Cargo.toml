@@ -5,7 +5,7 @@ authors = ["Scallop Ye <yescallop@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-anyhow = "1.0"
+thiserror = "1.0"
 displaydoc = "0.1"
 # TODO: async
-# tokio = { version = "1.2", features = ["full"] }
+# tokio = { version = "1", features = ["full"] }

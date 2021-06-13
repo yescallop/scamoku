@@ -1,27 +1,65 @@
-use std::{
-    fmt,
-    ops::{Index, IndexMut},
-    str::FromStr,
-};
+use std::{cmp::Ordering, convert::TryInto, fmt, str::FromStr};
+use thiserror::Error;
+
 use Direction::*;
 
-/// A 2D point with `u32` coordinates.
+/// A 2D point with `u8` coordinates.
 #[derive(Eq, PartialEq, Copy, Clone)]
 pub struct Point {
-    pub x: u32,
-    pub y: u32,
+    /// The horizontal coordinate.
+    pub x: u8,
+    /// The vertical coordinate.
+    pub y: u8,
 }
 
 impl Point {
     /// Creates a new `Point` with the given coordinates.
-    pub fn new(x: u32, y: u32) -> Point {
+    #[inline]
+    pub const fn new(x: u8, y: u8) -> Point {
         Point { x, y }
+    }
+
+    /// Returns the point adjacent to this point in the given direction.
+    ///
+    /// `None` is returned when out of bounds.
+    pub fn adjacent(self, d: Direction) -> Option<Point> {
+        #[inline]
+        fn f(i: u8, o: Ordering) -> Option<u8> {
+            match o {
+                Ordering::Less => i.checked_sub(1),
+                Ordering::Equal => Some(i),
+                Ordering::Greater => i.checked_add(1),
+            }
+        }
+        let ord = d.ord();
+        Some(Point::new(f(self.x, ord.0)?, f(self.y, ord.1)?))
     }
 }
 
-impl From<(u32, u32)> for Point {
-    fn from(t: (u32, u32)) -> Self {
+impl From<(u8, u8)> for Point {
+    #[inline]
+    fn from(t: (u8, u8)) -> Self {
         Point::new(t.0, t.1)
+    }
+}
+
+impl fmt::Display for Point {
+    /// Formats a `Point` as a point reference.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.x < 26 {
+            return write!(f, "{}{}", (b'A' + self.x) as char, self.y + 1);
+        }
+
+        let low = self.x % 26;
+        let high = self.x / 26 - 1;
+
+        write!(
+            f,
+            "{}{}{}",
+            (b'A' + high) as char,
+            (b'A' + low) as char,
+            self.y + 1
+        )
     }
 }
 
@@ -31,92 +69,49 @@ impl fmt::Debug for Point {
     }
 }
 
-use anyhow::{ensure, Context};
+#[derive(Error, Debug, PartialEq, Eq)]
+#[error("invalid point reference")]
+/// An error parsing a point.
+pub struct ParsePointError;
 
 impl FromStr for Point {
-    type Err = anyhow::Error;
-    /// Parses a point reference, e.g. C5, ab12, etc., into a `Point`.
+    type Err = ParsePointError;
+    /// Parses a point reference, e.g. C5, i7, into a `Point`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        #[inline]
+        fn alpha_to_num(b: u8) -> Option<u8> {
+            match b {
+                b'a'..=b'z' => Some(b - b'a'),
+                b'A'..=b'Z' => Some(b - b'A'),
+                _ => None,
+            }
+        }
+
         let bytes = s.as_bytes();
         let len = bytes.len();
-        ensure!(len >= 2, "length < 2");
-
-        let mut x = 0;
-
-        let mut i = 0;
-        while i < len {
-            let b = bytes[i];
-            let n = match b {
-                b'a'..=b'z' => b - b'a',
-                b'A'..=b'Z' => b - b'A',
-                _ => {
-                    ensure!(x != 0, "invalid column");
-                    break;
-                }
-            } as u32;
-
-            x *= 26;
-            x += n + 1;
-            i += 1;
-        }
-        let x = x - 1;
-        let y = s[i..].parse::<u32>().context("invalid row")? - 1;
-        Ok(Point { x, y })
-    }
-}
-
-impl fmt::Display for Point {
-    /// Formats a `Point` as a point reference.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.x < 26 {
-            // Avoid unnecessary calculations for x < 26
-            return write!(f, "{}{}", (b'A' + self.x as u8) as char, self.y + 1);
+        // Range: A1 - IV256
+        if len < 2 || len > 5 {
+            return Err(ParsePointError);
         }
 
-        let mut v = Vec::with_capacity(2);
-        let mut x = self.x;
-        loop {
-            v.push(b'A' + (x % 26) as u8);
-            x /= 26;
-            if x == 0 {
-                break;
-            }
-            x -= 1;
-        }
-        v.reverse();
-        write!(
-            f,
-            "{}{}",
-            // SAFETY: The bytes are all ASCII thus valid UTF-8 and reversible.
-            unsafe { String::from_utf8_unchecked(v) },
-            self.y + 1
-        )
-    }
-}
+        let parse = || {
+            let mut x = alpha_to_num(bytes[0])?;
 
-/// An intersection on the board.
-#[derive(Debug, Copy, Clone, Default)]
-pub struct Intersection {
-    /// The stone type in the intersection, or `None` if empty.
-    stone: Option<Stone>,
-    /// The move index of the intersection, or `0` if empty.
-    move_index: u32,
-}
+            let row = if let Some(n) = alpha_to_num(bytes[1]) {
+                x = (x + 1).checked_mul(26)?.checked_add(n)?;
+                &s[2..]
+            } else {
+                &s[1..]
+            };
 
-impl Intersection {
-    /// Returns the stone type in the intersection, or `None` if empty.
-    pub fn stone(&self) -> Option<Stone> {
-        self.stone
-    }
-
-    /// Returns `true` if the intersection is empty.
-    pub fn is_empty(&self) -> bool {
-        self.stone.is_none()
-    }
-
-    /// Returns the move index of the intersection starting from 1, or `0` if empty.
-    pub fn move_index(&self) -> u32 {
-        self.move_index
+            let y = row
+                .parse::<u16>()
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|n| n.try_into().ok())?;
+            Some((x, y))
+        };
+        parse().map(Point::from).ok_or(ParsePointError)
     }
 }
 
@@ -131,6 +126,7 @@ pub enum Stone {
 
 impl Stone {
     /// Returns the opposite stone.
+    #[inline]
     pub fn opposite(self) -> Stone {
         match self {
             Stone::Black => Stone::White,
@@ -149,256 +145,9 @@ impl fmt::Display for Stone {
     }
 }
 
-/// A square gomoku board.
-#[derive(Debug, Clone)]
-pub struct Board {
-    size: u32,
-    ints: Vec<Intersection>,
-    cur_move_index: u32,
-}
-
-impl Board {
-    /// Creates a new `Board` with the given `size`.
-    ///
-    /// # Panics
-    /// Panics if the `size` is less than 5 or even.
-    pub fn new(size: u32) -> Self {
-        assert!(size >= 5, "size < 5");
-        assert!(size % 2 == 1, "even size: {}", size);
-        Board {
-            size,
-            ints: vec![Default::default(); (size * size) as usize],
-            cur_move_index: 0,
-        }
-    }
-
-    /// Returns the size of the board, that is, the number of columns or rows on the board.
-    pub fn size(&self) -> u32 {
-        self.size
-    }
-
-    /// Returns the current move index of the board, or `0` if the board is empty.
-    pub fn cur_move_index(&self) -> u32 {
-        self.cur_move_index
-    }
-
-    /// Returns the index of an intersection in `ints`,
-    /// or `None` if the given point is out of board.
-    fn index_at(&self, p: Point) -> Option<usize> {
-        let size = self.size;
-        if p.x < size && p.y < size {
-            Some((p.y * size + p.x) as usize)
-        } else {
-            None
-        }
-    }
-
-    /// Tests whether a point is contained in the board.
-    pub fn contains_point(&self, p: Point) -> bool {
-        let size = self.size;
-        p.x < size && p.y < size
-    }
-
-    /// Returns a reference to an intersection,
-    /// or `None` if the given point is out of board.
-    pub fn get(&self, p: Point) -> Option<&Intersection> {
-        self.index_at(p).map(|i| &self.ints[i])
-    }
-
-    /// Returns a mutable reference to an intersection,
-    /// or `None` if the given point is out of board.
-    pub fn get_mut(&mut self, p: Point) -> Option<&mut Intersection> {
-        match self.index_at(p) {
-            Some(i) => Some(&mut self.ints[i]),
-            None => None,
-        }
-    }
-
-    /// Makes a move on the board.
-    ///
-    /// # Panics
-    /// Panics when moving out of board or into an occupied intersection.
-    pub fn make_move(&mut self, p: Point, stone: Stone) {
-        let index = self.cur_move_index + 1;
-        self.cur_move_index = index;
-
-        let int = self.get_mut(p).expect("moving out of board");
-        assert!(int.is_empty(), "moving into an occupied intersection");
-        int.stone = Some(stone);
-        int.move_index = index;
-    }
-
-    /// Tests if two points are symmetrical on the board.
-    ///
-    /// # Panics
-    /// Panics if any of the points is out of board.
-    pub fn is_symmetrical(&self, p1: Point, p2: Point) -> bool {
-        let size = self.size();
-        let (x1, y1, x2, y2) = (p1.x, p1.y, p2.x, p2.y);
-        assert!(
-            x1 < size && y1 < size && x2 < size && y2 < size,
-            "out of board"
-        );
-
-        if x1 == x2 {
-            y1 + y2 + 1 == size
-        } else if x1 + x2 + 1 == size {
-            y1 == y2 || y1 + y2 + 1 == size
-        } else {
-            false
-        }
-    }
-
-    /// Returns the adjacent point on the given direction of a point.
-    ///
-    /// `None` is returned when reaching out of board.
-    ///
-    /// # Panics
-    /// Panics if the point is out of board.
-    pub fn adjacent(&self, p: Point, d: Direction) -> Option<Point> {
-        let (x, y) = (p.x, p.y);
-        let size = self.size();
-        assert!(x < size && y < size, "out of board");
-
-        let res = match d {
-            Up => (Some(x), Some(y + 1)),
-            UpRight => (Some(x + 1), Some(y + 1)),
-            Right => (Some(x + 1), Some(y)),
-            DownRight => (Some(x + 1), y.checked_sub(1)),
-            Down => (Some(x), y.checked_sub(1)),
-            DownLeft => (x.checked_sub(1), y.checked_sub(1)),
-            Left => (x.checked_sub(1), Some(y)),
-            UpLeft => (x.checked_sub(1), Some(y + 1)),
-        };
-        let size = self.size();
-        match res {
-            (Some(x), Some(y)) if x < size && y < size => Some(Point { x, y }),
-            _ => None,
-        }
-    }
-
-    /// Calculates the row length on the given direction at a point.
-    fn row_len(&self, p: Point, stone: Stone, d: Direction) -> u32 {
-        let mut res = 1;
-
-        for &cur_d in &[d, d.opposite()] {
-            let mut cur_p = p;
-            loop {
-                // Should panic here if out of board.
-                cur_p = match self.adjacent(cur_p, cur_d) {
-                    Some(p) => p,
-                    None => break,
-                };
-                if self[cur_p].stone == Some(stone) {
-                    res += 1;
-                } else {
-                    break;
-                }
-            }
-        }
-        res
-    }
-
-    /// Returns an iterator over the lengths of rows at a point, or `None` if empty.
-    ///
-    /// # Panics
-    /// Panics if the point is out of board.
-    pub fn row_len_iter(&self, p: Point) -> Option<RowLenIter<'_>> {
-        self[p].stone.map(|stone| RowLenIter {
-            board: self,
-            p,
-            stone,
-            i: 0,
-        })
-    }
-
-    /// Returns the [Chebyshev distance][1] from a point to the board center.
-    ///
-    /// [1]: https://en.wikipedia.org/wiki/Chebyshev_distance
-    ///
-    /// # Panics
-    /// Panics if the point is out of board.
-    pub fn chebyshev_dist_to_center(&self, p: Point) -> u32 {
-        let size = self.size();
-        assert!(p.x < size && p.y < size, "out of board");
-        let center = ((size - 1) / 2) as i32;
-        let dx = (p.x as i32 - center).abs() as u32;
-        let dy = (p.y as i32 - center).abs() as u32;
-        dx.max(dy)
-    }
-}
-
-/// An iterator over the lengths of rows at a point.
-pub struct RowLenIter<'a> {
-    board: &'a Board,
-    p: Point,
-    stone: Stone,
-    i: usize,
-}
-
-impl<'a> Iterator for RowLenIter<'a> {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<u32> {
-        let d = *[Right, UpRight, Up, UpLeft].get(self.i)?;
-        self.i += 1;
-        Some(self.board.row_len(self.p, self.stone, d))
-    }
-}
-
-impl Default for Board {
-    /// Returns a default board of size 15 (Renju Board).
-    fn default() -> Self {
-        Board::new(15)
-    }
-}
-
-impl Index<Point> for Board {
-    type Output = Intersection;
-
-    fn index(&self, i: Point) -> &Self::Output {
-        self.get(i).expect("index out of bounds")
-    }
-}
-
-impl IndexMut<Point> for Board {
-    fn index_mut(&mut self, i: Point) -> &mut Self::Output {
-        self.get_mut(i).expect("index out of bounds")
-    }
-}
-
-impl fmt::Display for Board {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let size = self.size;
-        if size > 26 {
-            return write!(f, "Board(size={})", size);
-        }
-        for y in (0..size).rev() {
-            if y < 9 {
-                write!(f, " ")?;
-            }
-            write!(f, "{}", y + 1)?;
-            for x in 0..size {
-                let int = self.ints[(y * size + x) as usize];
-                let char = match int.stone() {
-                    Some(Stone::Black) => 'X',
-                    Some(Stone::White) => '0',
-                    None => '-',
-                };
-                write!(f, " {}", char)?;
-            }
-            writeln!(f)?;
-        }
-        write!(f, "  ")?;
-        for x in 0..size {
-            write!(f, " {}", (b'A' + x as u8) as char)?;
-        }
-        Ok(())
-    }
-}
-
 /// A direction on the board.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[allow(missing_docs)]
 pub enum Direction {
     Up,
     UpRight,
@@ -411,7 +160,24 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// Returns the orderings (x, y) of the direction.
+    #[inline]
+    pub fn ord(self) -> (Ordering, Ordering) {
+        use Ordering::*;
+        match self {
+            Up => (Equal, Greater),
+            UpRight => (Greater, Greater),
+            Right => (Greater, Equal),
+            DownRight => (Greater, Less),
+            Down => (Equal, Less),
+            DownLeft => (Less, Less),
+            Left => (Less, Equal),
+            UpLeft => (Less, Greater),
+        }
+    }
+
     /// Returns the opposite direction.
+    #[inline]
     pub fn opposite(self) -> Direction {
         match self {
             Up => Down,
@@ -429,13 +195,44 @@ impl Direction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn point() {
-        assert_eq!(Point::new(0, 0), "A1".parse().unwrap());
-        assert_eq!(Point::new(26, 9), "aa10".parse().unwrap());
-        for x in 0..1000 {
-            let p = Point::new(x, 0);
-            assert_eq!(p, p.to_string().parse().unwrap());
+    fn point_fmt_parse() {
+        assert_eq!("A1".parse(), Ok(Point::new(0, 0)));
+        assert_eq!("iv256".parse(), Ok(Point::new(u8::MAX, u8::MAX)));
+
+        assert!(Point::from_str("A").is_err());
+        assert!(Point::from_str("1").is_err());
+        assert!(Point::from_str("A0").is_err());
+        assert!(Point::from_str("A257").is_err());
+        assert!(Point::from_str("A65535").is_err());
+        assert!(Point::from_str("IW1").is_err());
+        assert!(Point::from_str("AAA1").is_err());
+
+        for i in 1..u8::MAX {
+            let p = Point::new(i, i);
+            assert_eq!(p.to_string().parse(), Ok(p));
+        }
+    }
+
+    #[test]
+    fn point_adjacent() {
+        let p = Point::new(1, 1);
+        assert_eq!(p.adjacent(Up), Some(Point::new(1, 2)));
+        assert_eq!(p.adjacent(UpRight), Some(Point::new(2, 2)));
+        assert_eq!(p.adjacent(Right), Some(Point::new(2, 1)));
+        assert_eq!(p.adjacent(DownRight), Some(Point::new(2, 0)));
+        assert_eq!(p.adjacent(Down), Some(Point::new(1, 0)));
+        assert_eq!(p.adjacent(DownLeft), Some(Point::new(0, 0)));
+        assert_eq!(p.adjacent(Left), Some(Point::new(0, 1)));
+        assert_eq!(p.adjacent(UpLeft), Some(Point::new(0, 2)));
+
+        for &d in &[DownRight, Down, DownLeft, Left, UpLeft] {
+            assert!(Point::new(0, 0).adjacent(d).is_none());
+        }
+
+        for &d in &[Up, UpRight, Right, DownRight, UpLeft] {
+            assert!(Point::new(255, 255).adjacent(d).is_none());
         }
     }
 }
