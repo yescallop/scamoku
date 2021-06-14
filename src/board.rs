@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, convert::TryInto, fmt, str::FromStr};
+use std::{convert::TryInto, fmt, str::FromStr};
 use thiserror::Error;
 
 use Direction::*;
@@ -23,16 +23,18 @@ impl Point {
     ///
     /// `None` is returned when out of bounds.
     pub fn adjacent(self, d: Direction) -> Option<Point> {
-        #[inline]
-        fn f(i: u8, o: Ordering) -> Option<u8> {
-            match o {
-                Ordering::Less => i.checked_sub(1),
-                Ordering::Equal => Some(i),
-                Ordering::Greater => i.checked_add(1),
-            }
-        }
-        let ord = d.ord();
-        Some(Point::new(f(self.x, ord.0)?, f(self.y, ord.1)?))
+        let (x, y) = (self.x, self.y);
+        let adj = match d {
+            Up => (Some(x), y.checked_add(1)),
+            UpRight => (x.checked_add(1), y.checked_add(1)),
+            Right => (x.checked_add(1), Some(y)),
+            DownRight => (x.checked_add(1), y.checked_sub(1)),
+            Down => (Some(x), y.checked_sub(1)),
+            DownLeft => (x.checked_sub(1), y.checked_sub(1)),
+            Left => (x.checked_sub(1), Some(y)),
+            UpLeft => (x.checked_sub(1), y.checked_add(1)),
+        };
+        Some(Point::new(adj.0?, adj.1?))
     }
 }
 
@@ -47,7 +49,7 @@ impl fmt::Display for Point {
     /// Formats a `Point` as a point reference.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.x < 26 {
-            return write!(f, "{}{}", (b'A' + self.x) as char, self.y + 1);
+            return write!(f, "{}{}", (b'A' + self.x) as char, self.y as u16 + 1);
         }
 
         let low = self.x % 26;
@@ -58,7 +60,7 @@ impl fmt::Display for Point {
             "{}{}{}",
             (b'A' + high) as char,
             (b'A' + low) as char,
-            self.y + 1
+            self.y as u16 + 1
         )
     }
 }
@@ -160,22 +162,6 @@ pub enum Direction {
 }
 
 impl Direction {
-    /// Returns the orderings (x, y) of the direction.
-    #[inline]
-    pub fn ord(self) -> (Ordering, Ordering) {
-        use Ordering::*;
-        match self {
-            Up => (Equal, Greater),
-            UpRight => (Greater, Greater),
-            Right => (Greater, Equal),
-            DownRight => (Greater, Less),
-            Down => (Equal, Less),
-            DownLeft => (Less, Less),
-            Left => (Less, Equal),
-            UpLeft => (Less, Greater),
-        }
-    }
-
     /// Returns the opposite direction.
     #[inline]
     pub fn opposite(self) -> Direction {
@@ -198,8 +184,18 @@ mod tests {
 
     #[test]
     fn point_fmt_parse() {
+        assert_eq!(Point::new(0, 0).to_string(), "A1");
+        assert_eq!(Point::new(255, 255).to_string(), "IV256");
+        assert_eq!(Point::new(7, 6).to_string(), "H7");
+        assert_eq!(Point::new(26, 9).to_string(), "AA10");
+
         assert_eq!("A1".parse(), Ok(Point::new(0, 0)));
-        assert_eq!("iv256".parse(), Ok(Point::new(u8::MAX, u8::MAX)));
+        assert_eq!("iV256".parse(), Ok(Point::new(u8::MAX, u8::MAX)));
+
+        for i in 0..=u8::MAX {
+            let p = Point::new(i, i);
+            assert_eq!(p.to_string().parse(), Ok(p));
+        }
 
         assert!(Point::from_str("A").is_err());
         assert!(Point::from_str("1").is_err());
@@ -208,11 +204,6 @@ mod tests {
         assert!(Point::from_str("A65535").is_err());
         assert!(Point::from_str("IW1").is_err());
         assert!(Point::from_str("AAA1").is_err());
-
-        for i in 1..u8::MAX {
-            let p = Point::new(i, i);
-            assert_eq!(p.to_string().parse(), Ok(p));
-        }
     }
 
     #[test]
