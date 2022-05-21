@@ -2,10 +2,9 @@
 name = "scamoku"
 version = "0.1.0"
 authors = ["Scallop Ye <yescallop@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 thiserror = "1.0"
-displaydoc = "0.1"
-# TODO: async
-# tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.18.2", features = ["sync"] }
+once_cell = "1.11.0"
