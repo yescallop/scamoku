@@ -366,9 +366,9 @@ pub struct Handle {
 }
 
 enum State {
-    PendingMove,
-    PendingMoveOffer(Vec<Point>),
-    PendingChoice(Side, Arc<ChoiceSet>),
+    Move,
+    MoveOffer(Vec<Point>),
+    Choice(Side, Arc<ChoiceSet>),
 }
 
 /// A game control.
@@ -426,7 +426,7 @@ impl Control {
             in_opening: true,
             cur_side: Side::First,
             cur_stone: Stone::Black,
-            state: State::PendingMove,
+            state: State::Move,
             request_sent: false,
             move_range: None,
             last_move_kind: MoveKind::Actual,
@@ -556,7 +556,7 @@ impl Control {
     pub fn request_move_offer(&mut self, count: usize) {
         assert!(self.in_opening && count != 0);
         if count != 1 {
-            self.state = State::PendingMoveOffer(Vec::with_capacity(count));
+            self.state = State::MoveOffer(Vec::with_capacity(count));
         }
     }
 
@@ -568,7 +568,7 @@ impl Control {
 
     /// Internal function for requesting a choice without checking the opening status.
     fn _request_choice(&mut self, side: Side, choice_set: ChoiceSet) {
-        self.state = State::PendingChoice(side, Arc::new(choice_set));
+        self.state = State::Choice(side, Arc::new(choice_set));
         self.cur_choice_index += 1;
     }
 
@@ -626,7 +626,7 @@ impl Control {
 
             // Request a choice before a move.
             let side = match self.state {
-                State::PendingChoice(side, _) => side,
+                State::Choice(side, _) => side,
                 _ => self.cur_side,
             };
 
@@ -653,12 +653,12 @@ impl Control {
     }
 
     fn send_request(&mut self) {
-        if let State::PendingChoice(side, ref set) = self.state {
+        if let State::Choice(side, ref set) = self.state {
             self.msg(side, Msg::ChoiceRequest(set.clone()))
         } else {
             // Request a move.
             let remaining = match &self.state {
-                State::PendingMoveOffer(v) => Some((v.capacity() - v.len()) as u32),
+                State::MoveOffer(v) => Some((v.capacity() - v.len()) as u32),
                 _ => None,
             };
             if let Some(range) = self.move_range {
@@ -688,15 +688,28 @@ impl Control {
                 self.rule.variant().judge(self, p, self.stone_by_side(side));
                 ensure!(self.is_ended(), FailedWinClaim(p));
             }
-            Cmd::Choice(i) => {
-                let set = if let State::PendingChoice(s, ref set) = self.state {
+            Cmd::Choice(choice) => {
+                let set = if let State::Choice(s, ref set) = self.state {
                     ensure!(s == side, IllTimed("not your turn to make a choice"));
                     set
                 } else {
                     return Err(IllTimed("no choice is requested"));
                 };
 
-                ensure!(set.contains_index(i), InvalidChoice(i, set.clone()));
+                ensure!(
+                    set.contains_index(choice),
+                    InvalidChoice(choice, set.clone())
+                );
+                self.msg_all(Msg::Choice(choice));
+
+                if let ChoiceSet::Move(moves) = &**set {
+                    let p = moves[choice as usize];
+                    // The move is to be made by the opponent.
+                    self.make_move(self.stone_by_side(side.opposite()), Some(p));
+                } else {
+                    self.rule.process_choice(self, choice);
+                }
+                self.state = State::Move;
             }
             Cmd::AcceptOrOfferDraw => todo!(),
             Cmd::Disconnect => self.end(GameResultKind::Disconnected, side.opposite()),
@@ -707,11 +720,11 @@ impl Control {
     fn process_move(&mut self, side: Side, mov: Option<Point>) -> Result<(), Error> {
         ensure!(self.cur_side == side, IllTimed("not your turn to move"));
         ensure!(
-            !matches!(self.state, State::PendingChoice(..)),
+            !matches!(self.state, State::Choice(..)),
             IllTimed("make your choice before moving")
         );
 
-        if let State::PendingMoveOffer(saved) = &mut self.state {
+        if let State::MoveOffer(saved) = &mut self.state {
             let p = mov.ok_or(IllTimed("pass when offering moves"))?;
 
             process_move_offer(&self.board, saved, p)?;
