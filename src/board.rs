@@ -65,7 +65,7 @@ impl Axis {
 ///
 /// # Attention
 ///
-/// This struct may not be used with coordinates greater than `i32::MAX`.
+/// This struct should not be used with coordinates greater than `i32::MAX`.
 /// This is required to avoid integer boundary checks.
 ///
 /// A `Point` must be checked to be inside the board before use.
@@ -81,26 +81,20 @@ impl Point {
     /// Creates a new `Point` with the given coordinates.
     #[inline]
     pub const fn new(x: u32, y: u32) -> Point {
-        debug_assert!(x <= i32::MAX as _ && y <= i32::MAX as _);
         Point { x, y }
     }
 
-    /// Returns the forward adjacent point in the direction of the axis.
+    /// Returns the adjacent point in the direction of the axis.
     ///
     /// This wraps around at the boundary of `u32`.
     #[inline]
-    pub fn forward(self, axis: Axis) -> Point {
+    pub fn adjacent(self, axis: Axis, forward: bool) -> Point {
         let (dx, dy) = axis.unit_vec();
-        Point::new(self.x.wrapping_add(dx as _), self.y.wrapping_add(dy as _))
-    }
-
-    /// Returns the backward adjacent point in the direction of the axis.
-    ///
-    /// This wraps around at the boundary of `u32`.
-    #[inline]
-    pub fn backward(self, axis: Axis) -> Point {
-        let (dx, dy) = axis.unit_vec();
-        Point::new(self.x.wrapping_sub(dx as _), self.y.wrapping_sub(dy as _))
+        if forward {
+            Point::new(self.x.wrapping_add(dx as _), self.y.wrapping_add(dy as _))
+        } else {
+            Point::new(self.x.wrapping_sub(dx as _), self.y.wrapping_sub(dy as _))
+        }
     }
 }
 
@@ -232,11 +226,11 @@ impl From<Option<Stone>> for OptStone {
     }
 }
 
-impl Into<Option<Stone>> for OptStone {
+impl From<OptStone> for Option<Stone> {
     #[inline]
-    fn into(self) -> Option<Stone> {
+    fn from(o: OptStone) -> Self {
         // This match gets optimized out into a single `mov`.
-        match self {
+        match o {
             OptStone::None => None,
             OptStone::Black => Some(Stone::Black),
             OptStone::White => Some(Stone::White),
@@ -245,7 +239,7 @@ impl Into<Option<Stone>> for OptStone {
 }
 
 /// A slot (namely intersection) on the board.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct Slot {
     stone: OptStone,
@@ -255,19 +249,19 @@ pub struct Slot {
 impl Slot {
     /// Returns `true` if the slot is empty.
     #[inline]
-    pub fn is_empty(self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.stone == OptStone::None
     }
 
     /// Returns the stone in the slot, or `None` if empty.
     #[inline]
-    pub fn stone(self) -> Option<Stone> {
+    pub fn stone(&self) -> Option<Stone> {
         self.stone.into()
     }
 
     /// Returns the move index of the slot starting from 1, or `0` if empty.
     #[inline]
-    pub fn move_index(self) -> u16 {
+    pub fn move_index(&self) -> u16 {
         self.move_index
     }
 }
@@ -336,7 +330,7 @@ impl Board {
     ///
     /// Panics if the size is less than 5 or greater than 255.
     pub fn new(size: u32) -> Self {
-        assert!(size >= 5 && size <= 255);
+        assert!((5..=255).contains(&size));
         Board {
             // SAFETY: `size` is checked to be non-zero.
             mat: unsafe { SqrMat::new(size) },
@@ -387,14 +381,14 @@ impl Board {
 
     /// Returns the current move index, or `0` if empty.
     #[inline]
-    pub fn cur_move_index(&self) -> u16 {
-        self.cur_move_index
+    pub fn cur_move_index(&self) -> u32 {
+        self.cur_move_index as u32
     }
 
-    /// Returns the maximum move index.
+    /// Returns `true` if the board is full.
     #[inline]
-    pub fn max_move_index(&self) -> u16 {
-        self.max_move_index
+    pub fn is_full(&self) -> bool {
+        self.cur_move_index == self.max_move_index
     }
 
     /// Makes a move on the board.
@@ -424,6 +418,58 @@ impl Board {
         let dy = (p.y as i32 - center).unsigned_abs();
         dx.max(dy)
     }
+
+    fn _row_len(&self, mut p: Point, stone: Stone, axis: Axis, forward: bool) -> u32 {
+        let mut len = 0;
+        loop {
+            p = p.adjacent(axis, forward);
+            if self.get(p).and_then(Slot::stone) == Some(stone) {
+                len += 1;
+            } else {
+                break;
+            }
+        }
+        len
+    }
+
+    /// Calculates the length of the row through a point on the given axis.
+    ///
+    /// This method assumes that the slot at the point is occupied.
+    fn row_len(&self, p: Point, stone: Stone, axis: Axis) -> u32 {
+        self._row_len(p, stone, axis, true) + self._row_len(p, stone, axis, false) + 1
+    }
+
+    /// Returns `true` if the length of any row through the point matches the predicate.
+    pub fn row_len_any(&self, p: Point, pred: impl Fn(u32) -> bool) -> bool {
+        let stone = self[p].stone().unwrap();
+        for axis in [
+            Axis::Vertical,
+            Axis::Ascending,
+            Axis::Horizontal,
+            Axis::Descending,
+        ] {
+            if pred(self.row_len(p, stone, axis)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Tests if two points are symmetrical on the board.
+    ///
+    /// This method assumes that the board size is odd.
+    pub fn is_symmetrical(&self, p1: Point, p2: Point) -> bool {
+        let size = self.size;
+        let (x1, y1, x2, y2) = (p1.x, p1.y, p2.x, p2.y);
+
+        if x1 == x2 {
+            y1 + y2 + 1 == size
+        } else if x1 + x2 + 1 == size {
+            y1 == y2 || y1 + y2 + 1 == size
+        } else {
+            false
+        }
+    }
 }
 
 impl Drop for Board {
@@ -433,6 +479,9 @@ impl Drop for Board {
         unsafe { alloc::dealloc(self.mat.as_ptr().cast(), SqrMat::layout(self.size)) }
     }
 }
+
+unsafe impl Send for Board {}
+unsafe impl Sync for Board {}
 
 impl<P: Into<Point>> Index<P> for Board {
     type Output = Slot;
@@ -488,14 +537,14 @@ mod tests {
     #[test]
     fn point_adjacent() {
         let p = Point::new(1, 1);
-        assert_eq!(p.forward(Vertical), (1, 2));
-        assert_eq!(p.forward(Ascending), (2, 2));
-        assert_eq!(p.forward(Horizontal), (2, 1));
-        assert_eq!(p.forward(Descending), (2, 0));
-        assert_eq!(p.backward(Vertical), (1, 0));
-        assert_eq!(p.backward(Ascending), (0, 0));
-        assert_eq!(p.backward(Horizontal), (0, 1));
-        assert_eq!(p.backward(Descending), (0, 2));
+        assert_eq!(p.adjacent(Vertical, true), (1, 2));
+        assert_eq!(p.adjacent(Ascending, true), (2, 2));
+        assert_eq!(p.adjacent(Horizontal, true), (2, 1));
+        assert_eq!(p.adjacent(Descending, true), (2, 0));
+        assert_eq!(p.adjacent(Vertical, false), (1, 0));
+        assert_eq!(p.adjacent(Ascending, false), (0, 0));
+        assert_eq!(p.adjacent(Horizontal, false), (0, 1));
+        assert_eq!(p.adjacent(Descending, false), (0, 2));
     }
 
     #[test]
@@ -517,7 +566,7 @@ mod tests {
     fn board() {
         let mut board = Board::new(15);
 
-        assert_eq!(board.max_move_index(), 225);
+        assert_eq!(board.max_move_index, 225);
 
         assert!(board.get((8, 8).into()).is_some());
         assert!(board.get((15, 8).into()).is_none());
@@ -525,7 +574,7 @@ mod tests {
         assert!(board.contains_point((8, 8).into()));
         assert!(!board.contains_point((15, 8).into()));
 
-        let slot = board[(0, 0)];
+        let slot = &board[(0, 0)];
         assert!(slot.is_empty());
         assert_eq!(slot.stone(), None);
         assert_eq!(slot.move_index(), 0);
@@ -534,7 +583,7 @@ mod tests {
         board.make_move((0, 0).into(), Stone::Black);
         assert_eq!(board.cur_move_index(), 1);
 
-        let slot = board[(0, 0)];
+        let slot = &board[(0, 0)];
         assert!(!slot.is_empty());
         assert_eq!(slot.stone(), Some(Stone::Black));
         assert_eq!(slot.move_index(), 1);

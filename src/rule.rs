@@ -5,7 +5,7 @@ use Variant::*;
 
 /// A variant of gomoku, which also serves as an opening rule.
 ///
-/// Reference: [Wikipedia](https://en.wikipedia.org/wiki/Gomoku#Variations)
+/// Reference: [Wikipedia](https://en.wikipedia.org/wiki/Gomoku#Variations).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Variant {
     /// Standard Gomoku.
@@ -18,41 +18,68 @@ pub enum Variant {
     Caro = 3,
 }
 
+impl Variant {
+    /// Judges a move on the board and ends the game if there is
+    /// a win or loss for the given stone.
+    pub fn judge(self, ctrl: &mut Control, p: Point, stone: Stone) {
+        let side = ctrl.side_by_stone(stone);
+        let board = ctrl.board();
+        let stone_on_board = board[p].stone().unwrap();
+
+        match self {
+            StandardGomoku => {
+                // A win requires a five.
+                // Note: Any five results in a win, not necessarily the longest row on board.
+                if stone_on_board == stone && board.row_len_any(p, |l| l == 5) {
+                    ctrl.end(GameResultKind::RowCompleted, side);
+                }
+            }
+            FreestyleGomoku => {
+                // A win requires a five or an overline.
+                if stone_on_board == stone && board.row_len_any(p, |l| l >= 5) {
+                    ctrl.end(GameResultKind::RowCompleted, side);
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
 impl fmt::Display for Variant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Variant::StandardGomoku => "Standard Gomoku",
-            Variant::FreestyleGomoku => "Freestyle Gomoku",
-            Variant::StandardRenju => "Standard Renju",
-            Variant::Caro => "Caro",
+            StandardGomoku => "Standard Gomoku",
+            FreestyleGomoku => "Freestyle Gomoku",
+            StandardRenju => "Standard Renju",
+            Caro => "Caro",
         })
     }
 }
 
 /// A trait for opening rules.
-pub trait OpRule: Sync {
-    /// Returns the ID of the rule;
+pub trait Rule: 'static + Sync {
+    /// Returns the unique identifier of the rule.
     fn id(&self) -> &str;
 
     /// Returns the variant of the rule.
     fn variant(&self) -> Variant;
 
     /// Processes a move in the opening.
-    fn process_move(&self, ctrl: &mut Control, p: Point, index: u16);
+    fn process_move(&self, ctrl: &mut Control, p: Point, index: u32);
 
     /// Processes a choice in the opening.
-    fn process_choice(&self, ctrl: &mut Control, choice: u8);
+    fn process_choice(&self, ctrl: &mut Control, choice: u32);
 
     /// Initializes the game.
     fn init(&self, ctrl: &mut Control);
 }
 
-impl OpRule for Variant {
+impl Rule for Variant {
     fn id(&self) -> &str {
         match self {
-            StandardGomoku => "std_gomoku",
-            FreestyleGomoku => "fst_gomoku",
-            StandardRenju => "std_renju",
+            StandardGomoku => "standard_gomoku",
+            FreestyleGomoku => "freestyle_gomoku",
+            StandardRenju => "standard_renju",
             Caro => "caro",
         }
     }
@@ -61,7 +88,7 @@ impl OpRule for Variant {
         *self
     }
 
-    fn process_move(&self, ctrl: &mut Control, _: Point, index: u16) {
+    fn process_move(&self, ctrl: &mut Control, _: Point, index: u32) {
         // Standard Renju
         match index {
             1 => ctrl.move_range(2),
@@ -71,7 +98,7 @@ impl OpRule for Variant {
         ctrl.swap();
     }
 
-    fn process_choice(&self, _: &mut Control, _: u8) {}
+    fn process_choice(&self, _: &mut Control, _: u32) {}
 
     fn init(&self, ctrl: &mut Control) {
         if *self == StandardRenju {
