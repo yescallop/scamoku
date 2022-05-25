@@ -1,4 +1,5 @@
 # scamoku
+
 Scamoku (蘇五目) is a [gomoku][1] / [renju][2] library written in Rust.
 
 [1]: https://en.wikipedia.org/wiki/Gomoku
