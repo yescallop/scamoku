@@ -1,6 +1,9 @@
 /// Module for working with moves on the board.
 pub mod moves;
 
+/// Modules for timing settings and clocks.
+pub mod timing;
+
 use crate::{
     board::*,
     rule::{Rule, Variant},
@@ -14,10 +17,10 @@ use std::{
     mem::{self, ManuallyDrop},
     ptr,
     sync::Arc,
-    time::Duration,
 };
 
 use self::moves::*;
+use self::timing::*;
 use self::Error::*;
 
 macro_rules! ensure {
@@ -57,43 +60,24 @@ impl fmt::Display for Side {
     }
 }
 
-/// Timing parameters.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum TimingParam {
-    /// Timeout of each move.
-    MoveTimeout,
-    /// Timeout of a game.
-    GameTimeout,
-    /// The time added after each move.
-    TimeIncrement,
-}
-
-/// Game settings.
+/// The settings of a game.
 #[derive(Debug, Clone)]
-pub enum Settings {
-    /// Opening rule info.
-    Rule {
-        /// The unique identifier.
-        id: &'static str,
-        /// The variant.
-        variant: Variant,
-    },
-    /// Timing parameter. Defaults to none if unset.
-    Timing {
-        /// The parameter.
-        param: TimingParam,
-        /// The value.
-        value: Duration,
-    },
-    /// Board size.
-    BoardSize(u32),
+pub struct Settings {
+    /// The unique identifier of the rule.
+    pub rule_id: &'static str,
+    /// The variant of the game.
+    pub variant: Variant,
     /// Indicates a strict game.
     ///
     /// A strict game will end immediately when a win is possible.
     /// Otherwise, an explicit claim is required for a win.
-    Strict,
+    pub strict: bool,
+    /// The board size.
+    pub board_size: u32,
     /// Moves that were originally on the board.
-    Moves(Box<[(Point, Stone)]>),
+    pub moves: Option<Box<[(Point, Stone)]>>,
+    /// The timing settings.
+    pub timing_settings: TimingSettings,
 }
 
 /// Errors occurred by an invalid command.
@@ -118,7 +102,7 @@ pub enum Error {
     #[error("win claim failed: {0}")]
     FailedWinClaim(Point),
     /// The choice index is invalid.
-    #[error("invalid choice: {0} in {1:?}")]
+    #[error("invalid choice: {0} for {1:?}")]
     InvalidChoice(u32, Arc<ChoiceSet>),
     /// An ill-timed command.
     #[error("ill-timed command: {0}")]
@@ -154,7 +138,7 @@ impl ChoiceSet {
 #[derive(Debug, Clone)]
 pub enum Msg {
     /// Game settings.
-    Settings(Arc<Vec<Settings>>),
+    Settings(Arc<Settings>),
     /// Game started.
     GameStart(Stone),
     /// Range on a board where the next move can be made.
@@ -246,6 +230,11 @@ impl CmdSender {
         self.send(Cmd::Pass);
     }
 
+    /// Makes a choice.
+    pub fn make_choice(&self, choice: u32) {
+        self.send(Cmd::Choice(choice));
+    }
+
     /// Claims a win in an intersection, either by moving in or for a forbidden move.
     pub fn claim_win(&self, p: Point) {
         self.send(Cmd::ClaimWin(p));
@@ -290,12 +279,12 @@ pub enum GameResultKind {
     ForbiddenMoveMade,
     /// Timeout.
     Timeout,
+    /// A draw has been accepted.
+    DrawAccepted,
     /// The board is full.
     BoardFull,
     /// Both players passed.
     BothPass,
-    /// A draw has been accepted.
-    DrawAccepted,
     /// Player or server disconnected.
     Disconnected,
 }
@@ -401,7 +390,6 @@ pub struct Control {
 
     /// The current state.
     state: State,
-    request_sent: bool,
     /// The range on the board where the next move can be made.
     move_range: Option<Range>,
     /// The kind of last move.
@@ -427,7 +415,6 @@ impl Control {
             cur_side: Side::First,
             cur_stone: Stone::Black,
             state: State::Move,
-            request_sent: false,
             move_range: None,
             last_move_kind: MoveKind::Actual,
             cur_choice_index: 0,
@@ -506,7 +493,7 @@ impl Control {
     /// # Panics
     ///
     /// Panics if the rule data is uninitialized or data types mismatch.
-    pub fn rule_data<T: Any>(&mut self) -> &mut T {
+    pub fn rule_data<T: Any + Send>(&mut self) -> &mut T {
         self.rule_data
             .as_deref_mut()
             .expect("uninitialized rule data")
@@ -595,18 +582,14 @@ impl Control {
     /// Starts the game.
     pub async fn start(mut self: Box<Self>) -> GameResult {
         // Broadcast the game settings.
-        let mut settings = Vec::with_capacity(3);
-
-        settings.push(Settings::Rule {
-            id: self.rule.id(),
+        let settings = Settings {
+            rule_id: self.rule.id(),
             variant: self.rule.variant(),
-        });
-        settings.push(Settings::BoardSize(self.board.size()));
-
-        if self.strict {
-            settings.push(Settings::Strict);
-        }
-
+            strict: self.strict,
+            board_size: self.board.size(),
+            moves: None,
+            timing_settings: Default::default(),
+        };
         self.msg_all(Msg::Settings(Arc::new(settings)));
 
         for side in [Side::First, Side::Second] {
@@ -630,9 +613,11 @@ impl Control {
                 _ => self.cur_side,
             };
 
+            self.send_request();
+
             // TODO: Calculate timeout.
             if !self.request_sent {
-                self.send_request();
+                
             }
 
             if let Some(cmd) = self.cmd_rx.recv().await {
@@ -652,9 +637,10 @@ impl Control {
         result
     }
 
-    fn send_request(&mut self) {
+    fn send_request(&mut self) -> Side {
         if let State::Choice(side, ref set) = self.state {
-            self.msg(side, Msg::ChoiceRequest(set.clone()))
+            self.msg(side, Msg::ChoiceRequest(set.clone()));
+            side
         } else {
             // Request a move.
             let remaining = match &self.state {
@@ -665,8 +651,8 @@ impl Control {
                 self.msg(self.cur_side, Msg::MoveRange(range));
             }
             self.msg(self.cur_side, Msg::MoveRequest(remaining));
+            self.cur_side
         }
-        self.request_sent = true;
     }
 
     fn process_cmd(&mut self, side: Side, cmd: Cmd) -> Result<(), Error> {
